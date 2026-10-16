@@ -2,7 +2,7 @@
 "use strict";
 
 /* Mindspace V2 — GitHub Pages */
-const GAS_URL = "請貼上你的GAS網頁應用程式網址";
+const GAS_URL = "https://script.google.com/macros/s/AKfycbwUooMD69_NMBhTzxf0Os_D6BEGb3QsGyhXpTGv09emRcG_4du219K4qO_FggY1vnLHOg/exec";
 
 const $ = id => document.getElementById(id);
 const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
