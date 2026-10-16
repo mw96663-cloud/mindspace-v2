@@ -7,7 +7,7 @@
    ========================================== */
 
 // 完成 GAS 部署後，把這裡改成你的 /exec 網址
-const GAS_URL = "請貼上你的GAS網頁應用程式網址";
+const GAS_URL = "https://script.google.com/macros/s/AKfycbzL7hGiCD_Hzk_G2tXDRkntToCTWwWFOUXIm9W17qbAR0w3lVV7FNEDmZGW5lsHVZuTrQ/exec";
 
 const $ = id => document.getElementById(id);
 
