@@ -63,82 +63,195 @@ async function scaledData(src, max = 650, format = "image/png") {
   return c.toDataURL(format, format === "image/jpeg" ? .86 : undefined);
 }
 
-/* ===== GAS BRIDGE =====
-   Bridge.html 主動向 top 回報 ready。
-   前端記住真正發送訊息的 window，不假設 iframe 只有一層。
-*/
+
+/* ===== GAS BRIDGE｜跨網域修正版 ===== */
+
 function googleOrigin(origin) {
   try {
     const u = new URL(origin);
+    const h = u.hostname.toLowerCase();
+
     return u.protocol === "https:" &&
-      (u.hostname === "script.google.com" ||
-       u.hostname === "script.googleusercontent.com" ||
-       u.hostname.endsWith(".script.googleusercontent.com") ||
-       u.hostname.endsWith(".googleusercontent.com"));
-  } catch { return false; }
+      (
+        h === "script.google.com" ||
+        h === "script.googleusercontent.com" ||
+        h.endsWith(".googleusercontent.com")
+      );
+  } catch {
+    return false;
+  }
 }
+
 function initializeBridge() {
   if (!/^https:\/\/script\.google\.com\/macros\/s\/.+\/exec/.test(GAS_URL)) {
-    status("⚠️ 請先在 sketch.js 填入 GAS 的 /exec 網址");
+    status("❌ GAS_URL 不是有效的 /exec 網址");
     return;
   }
+
+  const frame = $("bridgeFrame");
+
+  if (!frame) {
+    status("❌ 找不到 bridgeFrame iframe");
+    return;
+  }
+
+  // 防止重複初始化。
+  if (state.bridgeInitialized) return;
+  state.bridgeInitialized = true;
+
+  state.bridgeReady = false;
+  state.bridgeWindow = null;
+  state.bridgeOrigin = "";
+
   window.addEventListener("message", event => {
     const m = event.data;
-    if (!googleOrigin(event.origin) ||
-        !m || m.app !== "mindspace-v2" ||
-        m.token !== state.bridgeToken) return;
+
+    // 必須同時驗證 Google 來源、應用名稱及隨機 token。
+    if (!googleOrigin(event.origin)) return;
+    if (!m || typeof m !== "object") return;
+    if (m.app !== "mindspace-v2") return;
+    if (m.token !== state.bridgeToken) return;
 
     if (m.kind === "ready") {
+      if (!event.source) return;
+
       state.bridgeWindow = event.source;
       state.bridgeOrigin = event.origin;
       state.bridgeReady = true;
-      status("✅ GAS 橋接器已連線");
+
+      console.log(
+        "[Mindspace] 收到 GAS ready，來源：",
+        event.origin
+      );
+
+      status("✅ GAS 橋接器已連線，可以測試 AI");
+
+      // 回覆握手確認。
+      // 只傳送給剛剛通過驗證的 GAS 視窗。
+      try {
+        event.source.postMessage({
+          app: "mindspace-v2",
+          kind: "ack",
+          token: state.bridgeToken
+        }, "*");
+      } catch (error) {
+        console.warn("[Mindspace] ACK 傳送失敗：", error);
+      }
+
       return;
     }
+
     if (m.kind === "response") {
       const p = state.pending.get(m.id);
       if (!p) return;
+
+      // 只接受已確認的 GAS 視窗所送出的回應。
+      if (event.source !== state.bridgeWindow) return;
+
       clearTimeout(p.timer);
       state.pending.delete(m.id);
-      if (m.ok) p.resolve(m.result);
-      else p.reject(Error(m.error || "AI 後端執行失敗"));
+
+      if (m.ok) {
+        p.resolve(m.result);
+      } else {
+        p.reject(
+          new Error(m.error || "GAS AI 後端執行失敗")
+        );
+      }
     }
   });
 
   const url = new URL(GAS_URL);
-  url.searchParams.set("bridgeToken", state.bridgeToken);
-  url.searchParams.set("parentOrigin", location.origin);
-  $("bridgeFrame").src = url.toString();
+
+  url.searchParams.set(
+    "bridgeToken",
+    state.bridgeToken
+  );
+
+  url.searchParams.set(
+    "parentOrigin",
+    window.location.origin
+  );
+
+  console.log(
+    "[Mindspace] 正在載入 GAS：",
+    url.origin + url.pathname
+  );
+
+  frame.src = url.toString();
+
+  frame.addEventListener("error", () => {
+    status("❌ GAS iframe 載入發生錯誤");
+  });
 
   setTimeout(() => {
-    if (!state.bridgeReady)
-      status("⚠️ GAS 尚未完成連線。請確認 /exec 網址、部署版本及存取權限。");
-  }, 12000);
+    if (!state.bridgeReady) {
+      status(
+        "⚠️ 尚未收到 GAS ready 訊息。" +
+        "請檢查 Bridge.html 與部署版本。"
+      );
+    }
+  }, 15000);
 }
+
 function callAI(type, data = {}, timeout = 120000) {
   return new Promise((resolve, reject) => {
     if (!state.bridgeReady || !state.bridgeWindow) {
-      reject(Error("GAS 橋接器尚未連線，請先測試 AI 連線"));
+      reject(new Error(
+        "GAS 橋接器尚未連線，請等待連線成功"
+      ));
       return;
     }
+
     const id = uid();
+
     const timer = setTimeout(() => {
       state.pending.delete(id);
-      reject(Error("AI 回應逾時：" + type));
+
+      reject(new Error(
+        "AI 回應逾時：" + type
+      ));
     }, timeout);
-    state.pending.set(id, { resolve, reject, timer });
+
+    state.pending.set(id, {
+      resolve,
+      reject,
+      timer
+    });
+
     try {
-      state.bridgeWindow.postMessage({
-        app: "mindspace-v2", kind: "request",
-        token: state.bridgeToken, id, type, data
-      }, state.bridgeOrigin);
-    } catch (e) {
+      const message = {
+        app: "mindspace-v2",
+        kind: "request",
+        token: state.bridgeToken,
+        id,
+        type,
+        data
+      };
+
+      // 關鍵修正：
+      // GAS 的 WindowProxy 可能因為重新導向，
+      // 使記錄的 origin 與目前視窗 origin 不一致。
+      //
+      // 此處只對已通過來源與 token 驗證的
+      // bridgeWindow 使用 "*"。
+      // 不是向所有視窗廣播。
+      state.bridgeWindow.postMessage(message, "*");
+
+      console.log(
+        "[Mindspace] 已送出 AI 請求：",
+        type,
+        id
+      );
+
+    } catch (error) {
       clearTimeout(timer);
       state.pending.delete(id);
-      reject(e);
+      reject(error);
     }
   });
 }
+
 
 /* ===== AI 自然語音 ===== */
 function stopSpeech() {
