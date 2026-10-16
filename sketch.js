@@ -1,179 +1,185 @@
 
-"use strict";
+/* ===================================================
+   MINDSPACE V2 — COMPLETE FRONTEND
+   GitHub Pages + p5.js + Google Apps Script
+   =================================================== */
 
-/* ==========================================
-   MINDSPACE V2 — sketch.js
-   GitHub Pages 前端互動程式
-   ========================================== */
-
-// 完成 GAS 部署後，把這裡改成你的 /exec 網址
-const GAS_URL = "https://script.google.com/macros/s/AKfycbzL7hGiCD_Hzk_G2tXDRkntToCTWwWFOUXIm9W17qbAR0w3lVV7FNEDmZGW5lsHVZuTrQ/exec";
+const GAS_URL = "請貼上你原本的GAS網頁應用程式網址";
 
 const $ = id => document.getElementById(id);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const state = {
   heroes: [],
   selectedId: null,
   world: "ocean",
-  history: [],
   scenes: [],
-  particles: [],
+  history: [],
+  cameraStream: null,
+  facingMode: "environment",
+  editor: null,
+  brushMode: "erase",
+  undo: [],
   voiceEnabled: true,
+  recording: false,
+  recorder: null,
+  micStream: null,
+  audioChunks: [],
+  currentAudio: null,
+  speechToken: 0,
   bridgeReady: false,
   pending: new Map(),
-  cameraStream: null,
-  cameraFacing: "environment",
-  cameraRequestId: 0,
-  recorder: null,
-  audioStream: null,
-  audioChunks: [],
-  recording: false,
-  busy: false,
-  editorOriginal: null,
-  editorHeroId: null,
-  editorHistory: [],
-  editorMode: "erase",
-  editorPainting: false,
-  editorLastPoint: null
+  nextRequest: 0,
+  started: false,
+  busy: false
 };
 
+const AI_TIMEOUT = 150000;
+
+function setStatus(text) {
+  $("status").textContent = text;
+  console.log("[Mindspace]", text);
+}
+
 function makeId() {
-  return Date.now().toString(36) +
+  return "hero_" + Date.now() + "_" +
     Math.random().toString(36).slice(2, 8);
 }
 
-function clamp(n, min, max) {
-  return Math.max(min, Math.min(max, n));
-}
-
-function setStatus(message) {
-  $("status").textContent = message;
-  console.log("[Mindspace]", message);
-}
-
-function setSpeech(message) {
-  $("speechBubble").textContent = message;
-}
-
-function modal(id, visible) {
-  $(id).classList.toggle("hidden", !visible);
-}
-
 function selectedHero() {
-  return state.heroes.find(
-    hero => hero.id === state.selectedId
-  ) || null;
+  return state.heroes.find(h => h.id === state.selectedId) || null;
 }
 
-function loadImageAsync(source) {
-  return new Promise((resolve, reject) => {
-    const image = new Image();
-    image.onload = () => resolve(image);
-    image.onerror = () => reject(
-      new Error("圖片載入失敗")
-    );
-    image.src = source;
-  });
+function clamp(v, a, b) {
+  return Math.max(a, Math.min(b, v));
 }
 
-function readFileAsDataURL(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(
-      new Error("無法讀取照片")
-    );
-    reader.readAsDataURL(file);
-  });
+function rand(a, b) {
+  return a + Math.random() * (b - a);
 }
 
-function addClick(id, callback) {
-  $(id).addEventListener("click", () => {
-    try {
-      const result = callback();
-      if (result && typeof result.catch === "function") {
-        result.catch(error => {
-          setStatus("❌ " + error.message);
-        });
-      }
-    } catch (error) {
-      setStatus("❌ " + error.message);
+function addChat(who, message, kind = "ai") {
+  const line = document.createElement("div");
+  line.className = "msg " + kind;
+  line.textContent = who + "：" + message;
+  $("chatLog").appendChild(line);
+  $("chatLog").scrollTop = $("chatLog").scrollHeight;
+}
+
+function showBubble(message, ms = 4500) {
+  const bubble = $("speechBubble");
+  bubble.textContent = message;
+  bubble.style.display = "block";
+  const token = Date.now() + Math.random();
+  bubble.dataset.token = String(token);
+  setTimeout(() => {
+    if (bubble.dataset.token === String(token)) {
+      bubble.style.display = "none";
     }
-  });
+  }, ms);
 }
 
-/* ==========================================
-   GAS BRIDGE
-   ========================================== */
+/* =============== GAS BRIDGE =============== */
 
 function initializeBridge() {
-  if (!GAS_URL.startsWith("https://")) {
-    setStatus("⚠️ 尚未設定 GAS_URL，AI 暫時無法使用");
+  if (!/^https:\/\/script\.google\.com\/macros\/s\/.+\/exec/.test(GAS_URL)) {
+    setStatus("尚未填入 GAS_URL；基本功能仍可使用");
     return;
   }
 
   const frame = $("bridgeFrame");
-  const gasOrigin = new URL(GAS_URL).origin;
 
   window.addEventListener("message", event => {
-    if (event.source !== frame.contentWindow) {
-      return;
-    }
+    const permitted =
+      event.origin === "https://script.google.com" ||
+      event.origin === "https://script.googleusercontent.com";
 
-    if (
-      event.origin !== gasOrigin &&
-      event.origin !==
-        "https://script.googleusercontent.com"
-    ) {
-      return;
-    }
+    if (!permitted) return;
 
     const message = event.data;
-
-    if (!message || message.app !== "mindspace") {
-      return;
-    }
+    if (!message || message.app !== "mindspace") return;
 
     if (message.kind === "ready") {
       state.bridgeReady = true;
-      setStatus("✅ AI 後端已連線");
+      setStatus("AI 通訊橋接器已就緒");
       return;
     }
 
-    if (message.kind === "response") {
-      const pending = state.pending.get(message.id);
-      if (!pending) return;
+    if (message.kind !== "response") return;
 
-      state.pending.delete(message.id);
+    const key = String(message.id);
+    const entry = state.pending.get(key);
+    if (!entry) return;
 
-      if (message.ok) {
-        pending.resolve(message.result);
-      } else {
-        pending.reject(
-          new Error(message.error || "AI 執行失敗")
-        );
-      }
+    clearTimeout(entry.timer);
+    state.pending.delete(key);
+
+    if (message.ok === false ||
+        (message.result && message.result.ok === false)) {
+      entry.reject(new Error(
+        message.error ||
+        message.result?.error ||
+        "AI 呼叫失敗"
+      ));
+    } else {
+      entry.resolve(message.result ?? message.data);
     }
   });
 
+  frame.addEventListener("load", () => {
+    sendBridgeHello();
+  });
+
   frame.src = GAS_URL;
+
+  const helloTimer = setInterval(() => {
+    if (state.bridgeReady) {
+      clearInterval(helloTimer);
+    } else {
+      sendBridgeHello();
+    }
+  }, 1200);
+
+  setTimeout(() => clearInterval(helloTimer), 30000);
 }
 
-function callAI(type, data) {
-  return new Promise((resolve, reject) => {
-    if (!state.bridgeReady) {
-      reject(new Error(
-        "AI 尚未連線，請先完成 GAS 部署"
-      ));
-      return;
-    }
+function sendBridgeHello() {
+  const frame = $("bridgeFrame");
+  if (!frame.contentWindow) return;
+  frame.contentWindow.postMessage({
+    app: "mindspace",
+    kind: "hello"
+  }, "*");
+}
 
-    const id = makeId();
-
-    state.pending.set(id, {
-      resolve,
-      reject
+async function callAI(type, data = {}) {
+  if (!state.bridgeReady) {
+    sendBridgeHello();
+    await new Promise((resolve, reject) => {
+      const started = Date.now();
+      const timer = setInterval(() => {
+        if (state.bridgeReady) {
+          clearInterval(timer);
+          resolve();
+        } else if (Date.now() - started > 16000) {
+          clearInterval(timer);
+          reject(new Error("GAS 橋接器無法連線"));
+        } else {
+          sendBridgeHello();
+        }
+      }, 400);
     });
+  }
+
+  return new Promise((resolve, reject) => {
+    const id = "req_" + (++state.nextRequest) + "_" + Date.now();
+
+    const timer = setTimeout(() => {
+      state.pending.delete(id);
+      reject(new Error("AI 回應逾時"));
+    }, AI_TIMEOUT);
+
+    state.pending.set(id, { resolve, reject, timer });
 
     $("bridgeFrame").contentWindow.postMessage({
       app: "mindspace",
@@ -182,1197 +188,637 @@ function callAI(type, data) {
       type,
       data
     }, "*");
-
-    setTimeout(() => {
-      if (!state.pending.has(id)) return;
-
-      state.pending.delete(id);
-      reject(new Error("AI 回應逾時"));
-    }, 120000);
   });
 }
 
-/* ==========================================
-   語音輸出
-   ========================================== */
+/* =============== NATURAL AI VOICE =============== */
 
-function speak(text) {
-  if (
-    !state.voiceEnabled ||
-    !("speechSynthesis" in window)
-  ) {
-    return;
+function stopVoice() {
+  state.speechToken++;
+
+  if (state.currentAudio) {
+    state.currentAudio.pause();
+    state.currentAudio.src = "";
+    state.currentAudio = null;
   }
 
-  speechSynthesis.cancel();
+  if ("speechSynthesis" in window) {
+    speechSynthesis.cancel();
+  }
+}
 
-  const utterance =
-    new SpeechSynthesisUtterance(text);
+function browserSpeak(text) {
+  if (!("speechSynthesis" in window)) return;
 
+  const utterance = new SpeechSynthesisUtterance(text);
   utterance.lang = "zh-TW";
-  utterance.rate = 0.93;
-  utterance.pitch = 1.12;
-
-  const voices = speechSynthesis.getVoices();
-
-  utterance.voice =
-    voices.find(v => v.lang === "zh-TW") ||
-    voices.find(v => v.lang.startsWith("zh")) ||
-    null;
-
+  utterance.rate = 1.08;
+  utterance.pitch = 1.17;
   speechSynthesis.speak(utterance);
 }
 
-function addChat(name, message, isAI = false) {
-  const div = document.createElement("div");
+async function speak(text) {
+  if (!state.voiceEnabled || !text) return;
 
-  div.style.padding = "9px";
-  div.style.margin = "6px 0";
-  div.style.borderRadius = "12px";
-  div.style.background = isAI
-    ? "#ffe4ef"
-    : "#e4f1ff";
+  stopVoice();
+  const token = state.speechToken;
 
-  div.textContent = name + "：" + message;
+  try {
+    const result = await callAI("speakNatural", {
+      text: String(text).slice(0, 350),
+      voice: "coral"
+    });
 
-  $("chatLog").appendChild(div);
-  $("chatLog").scrollTop =
-    $("chatLog").scrollHeight;
+    if (token !== state.speechToken) return;
+    if (!result.audio) throw new Error("沒有音訊資料");
+
+    const audio = new Audio(result.audio);
+    state.currentAudio = audio;
+    audio.onended = () => {
+      if (state.currentAudio === audio) {
+        state.currentAudio = null;
+      }
+    };
+    await audio.play();
+
+  } catch (error) {
+    if (token !== state.speechToken) return;
+    console.warn("AI 自然語音：", error);
+    browserSpeak(text);
+  }
 }
 
 async function welcomeHero(hero) {
-  let message =
-    "哇！我終於誕生了！我會好多好多技能喔！" +
-    "你想要我表演什麼厲害的能力？";
+  let reply = `哇！我誕生了！我是${hero.name}！你想讓我表演什麼神奇技能呢？`;
 
   try {
     const result = await callAI("welcome", {
       name: hero.name,
       appearance: hero.appearance
     });
-
-    if (result.reply) {
-      message = result.reply;
-    }
+    if (result.reply) reply = result.reply;
   } catch (error) {
     console.warn(error);
   }
 
-  addChat("🐠 " + hero.name, message, true);
-  setSpeech("🐠 " + hero.name + "：" + message);
-  speak(message);
+  addChat(hero.name, reply);
+  showBubble(reply);
+  speak(reply);
 }
 
-/* ==========================================
-   攝影機
-   ========================================== */
+/* =============== CAMERA =============== */
+
+async function openCamera() {
+  $("cameraModal").classList.add("open");
+
+  try {
+    stopCamera();
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        facingMode: { ideal: state.facingMode },
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      }
+    });
+
+    state.cameraStream = stream;
+    $("cameraVideo").srcObject = stream;
+    await $("cameraVideo").play();
+    $("cameraMessage").textContent = "請把整個黏土角色放入畫面。";
+  } catch (error) {
+    $("cameraMessage").textContent =
+      "無法開啟攝影機：" + error.message;
+  }
+}
 
 function stopCamera() {
   if (state.cameraStream) {
-    state.cameraStream.getTracks().forEach(
-      track => track.stop()
-    );
+    state.cameraStream.getTracks().forEach(track => track.stop());
     state.cameraStream = null;
   }
+  $("cameraVideo").srcObject = null;
+}
 
+function capturePhoto() {
   const video = $("cameraVideo");
-  video.pause();
-  video.srcObject = null;
-  $("captureButton").disabled = true;
-}
-
-function closeCamera() {
-  state.cameraRequestId++;
-  stopCamera();
-  modal("cameraModal", false);
-}
-
-async function openCamera() {
-  const requestId = ++state.cameraRequestId;
-
-  stopCamera();
-  modal("cameraModal", true);
-
-  $("cameraMessage").textContent =
-    "正在開啟攝影機……";
-
-  try {
-    if (!window.isSecureContext) {
-      throw new Error("攝影機需要 HTTPS 網址");
-    }
-
-    if (!navigator.mediaDevices?.getUserMedia) {
-      throw new Error(
-        "目前瀏覽器不支援即時攝影機"
-      );
-    }
-
-    const stream =
-      await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: {
-          facingMode: {
-            ideal: state.cameraFacing
-          },
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        }
-      });
-
-    if (requestId !== state.cameraRequestId) {
-      stream.getTracks().forEach(
-        track => track.stop()
-      );
-      return;
-    }
-
-    state.cameraStream = stream;
-
-    const video = $("cameraVideo");
-    video.srcObject = stream;
-
-    await video.play();
-
-    $("captureButton").disabled = false;
-
-    $("cameraMessage").textContent =
-      "📸 攝影機已啟動，可以拍照！";
-
-    setStatus("📷 攝影機已啟動");
-  } catch (error) {
-    if (requestId !== state.cameraRequestId) {
-      return;
-    }
-
-    stopCamera();
-
-    $("cameraMessage").textContent =
-      "⚠️ " + error.message;
-
-    setStatus("❌ 攝影機：" + error.message);
-  }
-}
-
-async function capturePhoto() {
-  const video = $("cameraVideo");
-
-  if (!state.cameraStream || !video.videoWidth) {
-    setStatus("請等待攝影機準備完成");
+  if (!video.videoWidth) {
+    alert("攝影機還沒準備好");
     return;
   }
 
-  const scale =
-    Math.min(1, 1000 / video.videoWidth);
+  const canvas = document.createElement("canvas");
+  const scale = Math.min(1, 1200 / Math.max(
+    video.videoWidth, video.videoHeight
+  ));
 
-  const canvas =
-    document.createElement("canvas");
-
-  canvas.width =
-    Math.round(video.videoWidth * scale);
-
-  canvas.height =
-    Math.round(video.videoHeight * scale);
+  canvas.width = Math.round(video.videoWidth * scale);
+  canvas.height = Math.round(video.videoHeight * scale);
 
   canvas.getContext("2d").drawImage(
-    video,
-    0,
-    0,
-    canvas.width,
-    canvas.height
+    video, 0, 0, canvas.width, canvas.height
   );
 
-  const image = canvas.toDataURL("image/png");
-
-  closeCamera();
-
-  state.editorHeroId = null;
-  await openEditor(image);
+  stopCamera();
+  $("cameraModal").classList.remove("open");
+  openEditor(canvas.toDataURL("image/png"), null);
 }
 
-/* ==========================================
-   黏土去背
-   ========================================== */
+function uploadPhoto(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => openEditor(reader.result, null);
+  reader.readAsDataURL(file);
+}
 
-async function openEditor(source) {
-  const image = await loadImageAsync(source);
+/* =============== PHOTO EDITOR =============== */
 
-  const canvas = $("editCanvas");
-  const scale = Math.min(
-    1,
-    1000 / Math.max(image.width, image.height)
-  );
-
-  canvas.width =
-    Math.round(image.width * scale);
-
-  canvas.height =
-    Math.round(image.height * scale);
-
-  const ctx = canvas.getContext("2d", {
-    willReadFrequently: true
+function imageFromURL(src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("圖片載入失敗"));
+    image.src = src;
   });
-
-  ctx.clearRect(
-    0, 0, canvas.width, canvas.height
-  );
-
-  ctx.drawImage(
-    image, 0, 0,
-    canvas.width, canvas.height
-  );
-
-  state.editorOriginal = ctx.getImageData(
-    0, 0, canvas.width, canvas.height
-  );
-
-  state.editorHistory = [];
-  state.editorMode = "erase";
-
-  modal("editorModal", true);
 }
 
-function saveEditorHistory() {
-  const canvas = $("editCanvas");
-  const ctx = canvas.getContext("2d");
+async function openEditor(src, editingId) {
+  try {
+    const image = await imageFromURL(src);
+    const canvas = $("editCanvas");
 
-  state.editorHistory.push(
-    ctx.getImageData(
-      0, 0,
-      canvas.width,
-      canvas.height
-    )
-  );
+    const ratio = Math.min(
+      1, 1100 / Math.max(image.width, image.height)
+    );
 
-  if (state.editorHistory.length > 6) {
-    state.editorHistory.shift();
+    canvas.width = Math.round(image.width * ratio);
+    canvas.height = Math.round(image.height * ratio);
+
+    const ctx = canvas.getContext("2d", {
+      willReadFrequently: true
+    });
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+    state.editor = {
+      original: src,
+      editingId,
+      sourceImage: image
+    };
+
+    state.undo = [];
+    state.brushMode = "erase";
+    $("editorStatus").textContent =
+      "可以先點「AI 智慧去背」，也能手動修正。";
+    $("editorModal").classList.add("open");
+  } catch (error) {
+    alert(error.message);
   }
 }
 
-function undoEditor() {
-  const previous =
-    state.editorHistory.pop();
-
-  if (!previous) return;
-
-  $("editCanvas")
-    .getContext("2d")
-    .putImageData(previous, 0, 0);
+function pushUndo() {
+  const canvas = $("editCanvas");
+  state.undo.push(canvas.toDataURL("image/png"));
+  if (state.undo.length > 10) state.undo.shift();
 }
 
-function autoRemoveBackground() {
+async function setEditorImage(src) {
+  const image = await imageFromURL(src);
+  const canvas = $("editCanvas");
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const scale = Math.min(
+    canvas.width / image.width,
+    canvas.height / image.height
+  );
+
+  const w = image.width * scale;
+  const h = image.height * scale;
+
+  ctx.drawImage(
+    image,
+    (canvas.width - w) / 2,
+    (canvas.height - h) / 2,
+    w, h
+  );
+}
+
+async function restoreOriginalPhoto() {
+  if (!state.editor) return;
+  pushUndo();
+  await setEditorImage(state.editor.original);
+  $("editorStatus").textContent = "已還原原始照片";
+}
+
+async function undoEdit() {
+  const previous = state.undo.pop();
+  if (!previous) return;
+  await setEditorImage(previous);
+}
+
+function quickRemoveBackground() {
   const canvas = $("editCanvas");
   const ctx = canvas.getContext("2d", {
     willReadFrequently: true
   });
 
+  pushUndo();
+
+  const image = ctx.getImageData(
+    0, 0, canvas.width, canvas.height
+  );
+  const d = image.data;
   const w = canvas.width;
   const h = canvas.height;
 
-  const image =
-    ctx.getImageData(0, 0, w, h);
-
-  const data = image.data;
-
   const corners = [
-    [0, 0],
-    [w - 1, 0],
-    [0, h - 1],
-    [w - 1, h - 1]
+    0, (w - 1) * 4,
+    ((h - 1) * w) * 4,
+    (h * w - 1) * 4
   ];
 
-  const background = [0, 0, 0];
-
-  for (const [x, y] of corners) {
-    const i = (y * w + x) * 4;
-
-    for (let j = 0; j < 3; j++) {
-      background[j] += data[i + j] / 4;
-    }
-  }
+  const bg = [0, 1, 2].map(c =>
+    corners.reduce((sum, i) => sum + d[i + c], 0) / 4
+  );
 
   const visited = new Uint8Array(w * h);
   const queue = new Int32Array(w * h);
+  let head = 0, tail = 0;
 
-  let head = 0;
-  let tail = 0;
+  function tryAdd(x, y) {
+    if (x < 0 || x >= w || y < 0 || y >= h) return;
+    const pos = y * w + x;
+    if (visited[pos]) return;
+    visited[pos] = 1;
 
-  function similar(index) {
-    const i = index * 4;
+    const i = pos * 4;
+    const dist = Math.sqrt(
+      (d[i] - bg[0]) ** 2 +
+      (d[i + 1] - bg[1]) ** 2 +
+      (d[i + 2] - bg[2]) ** 2
+    );
 
-    const dr = data[i] - background[0];
-    const dg = data[i + 1] - background[1];
-    const db = data[i + 2] - background[2];
-
-    return (
-      dr * dr +
-      dg * dg +
-      db * db
-    ) < 4900;
-  }
-
-  function enqueue(x, y) {
-    if (
-      x < 0 || y < 0 ||
-      x >= w || y >= h
-    ) {
-      return;
+    if (dist < 90) {
+      queue[tail++] = pos;
     }
-
-    const index = y * w + x;
-
-    if (
-      visited[index] ||
-      !similar(index)
-    ) {
-      return;
-    }
-
-    visited[index] = 1;
-    queue[tail++] = index;
   }
-
-  saveEditorHistory();
 
   for (let x = 0; x < w; x++) {
-    enqueue(x, 0);
-    enqueue(x, h - 1);
+    tryAdd(x, 0);
+    tryAdd(x, h - 1);
   }
-
   for (let y = 0; y < h; y++) {
-    enqueue(0, y);
-    enqueue(w - 1, y);
+    tryAdd(0, y);
+    tryAdd(w - 1, y);
   }
 
   while (head < tail) {
-    const index = queue[head++];
-
-    const x = index % w;
-    const y = Math.floor(index / w);
-
-    data[index * 4 + 3] = 0;
-
-    enqueue(x - 1, y);
-    enqueue(x + 1, y);
-    enqueue(x, y - 1);
-    enqueue(x, y + 1);
+    const pos = queue[head++];
+    d[pos * 4 + 3] = 0;
+    const x = pos % w;
+    const y = Math.floor(pos / w);
+    tryAdd(x - 1, y);
+    tryAdd(x + 1, y);
+    tryAdd(x, y - 1);
+    tryAdd(x, y + 1);
   }
 
   ctx.putImageData(image, 0, 0);
-
-  setStatus("✨ 自動去背完成，可繼續修整");
+  $("editorStatus").textContent =
+    "快速去背完成，可使用橡皮擦修正。";
 }
+
+async function aiRemoveBackground() {
+  if (!state.editor) return;
+
+  const button = $("aiRemoveBg");
+  button.disabled = true;
+  button.textContent = "✨ AI 去背處理中...";
+
+  try {
+    const canvas = $("editCanvas");
+    const image = canvas.toDataURL("image/png");
+
+    $("editorStatus").textContent =
+      "AI 正在辨識黏土輪廓，請稍候...";
+
+    const result = await callAI("removeBackgroundAI", {
+      image
+    });
+
+    if (!result.image) {
+      throw new Error("AI 沒有回傳圖片");
+    }
+
+    pushUndo();
+    await setEditorImage(result.image);
+
+    $("editorStatus").textContent =
+      "AI 去背完成！請檢查形狀，必要時手動修正。";
+
+  } catch (error) {
+    $("editorStatus").textContent =
+      "AI 去背失敗：" + error.message;
+    alert(
+      "AI 去背失敗：" + error.message +
+      "\n你仍可以使用快速去背與手動工具。"
+    );
+  } finally {
+    button.disabled = false;
+    button.textContent = "✨ AI 智慧去背";
+  }
+}
+
+let painting = false;
 
 function editorPointer(event) {
   const canvas = $("editCanvas");
   const rect = canvas.getBoundingClientRect();
+  const x = (event.clientX - rect.left) *
+    canvas.width / rect.width;
+  const y = (event.clientY - rect.top) *
+    canvas.height / rect.height;
 
-  return {
-    x:
-      (event.clientX - rect.left) *
-      canvas.width / rect.width,
+  const ctx = canvas.getContext("2d");
+  const radius = Number($("brushSize").value) / 2;
 
-    y:
-      (event.clientY - rect.top) *
-      canvas.height / rect.height
-  };
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+
+  if (state.brushMode === "erase") {
+    ctx.globalCompositeOperation = "destination-out";
+    ctx.fill();
+  } else if (state.editor?.sourceImage) {
+    ctx.clip();
+    ctx.globalCompositeOperation = "source-over";
+    ctx.drawImage(
+      state.editor.sourceImage,
+      0, 0, canvas.width, canvas.height
+    );
+  }
+  ctx.restore();
 }
 
-function paintEditor(event) {
-  if (!state.editorPainting) return;
+function trimTransparent(src) {
+  return new Promise(async resolve => {
+    const image = await imageFromURL(src);
+    const c = document.createElement("canvas");
+    c.width = image.width;
+    c.height = image.height;
+    const ctx = c.getContext("2d", {
+      willReadFrequently: true
+    });
+    ctx.drawImage(image, 0, 0);
+    const data = ctx.getImageData(
+      0, 0, c.width, c.height
+    ).data;
 
-  const canvas = $("editCanvas");
-  const ctx = canvas.getContext("2d", {
-    willReadFrequently: true
+    let minX = c.width, minY = c.height;
+    let maxX = -1, maxY = -1;
+
+    for (let y = 0; y < c.height; y++) {
+      for (let x = 0; x < c.width; x++) {
+        if (data[(y * c.width + x) * 4 + 3] > 15) {
+          minX = Math.min(minX, x);
+          minY = Math.min(minY, y);
+          maxX = Math.max(maxX, x);
+          maxY = Math.max(maxY, y);
+        }
+      }
+    }
+
+    if (maxX < minX) {
+      resolve(src);
+      return;
+    }
+
+    const padding = 12;
+    const x = Math.max(0, minX - padding);
+    const y = Math.max(0, minY - padding);
+    const w = Math.min(c.width - x, maxX - x + 1 + padding);
+    const h = Math.min(c.height - y, maxY - y + 1 + padding);
+
+    const out = document.createElement("canvas");
+    out.width = w;
+    out.height = h;
+    out.getContext("2d").drawImage(
+      c, x, y, w, h, 0, 0, w, h
+    );
+    resolve(out.toDataURL("image/png"));
   });
+}
 
-  const image = ctx.getImageData(
-    0, 0,
-    canvas.width,
-    canvas.height
+async function saveEditor() {
+  if (!state.editor) return;
+
+  const png = await trimTransparent(
+    $("editCanvas").toDataURL("image/png")
   );
 
-  const data = image.data;
-  const original = state.editorOriginal.data;
+  if (state.editor.editingId) {
+    const hero = state.heroes.find(
+      h => h.id === state.editor.editingId
+    );
 
-  const current = editorPointer(event);
-  const previous =
-    state.editorLastPoint || current;
+    if (hero) {
+      hero.original = png;
+      hero.current = png;
+      hero.transformed = null;
+      hero.element.src = png;
+    }
+  } else {
+    const name = prompt(
+      "幫你的黏土生命取個名字：",
+      "小生命" + (state.heroes.length + 1)
+    ) || "小生命";
 
-  const radius =
-    Number($("brushSize").value) / 2;
-
-  const distance = Math.hypot(
-    current.x - previous.x,
-    current.y - previous.y
-  );
-
-  const steps = Math.max(
-    1,
-    Math.ceil(distance / Math.max(1, radius / 2))
-  );
-
-  for (let step = 0; step <= steps; step++) {
-    const x =
-      previous.x +
-      (current.x - previous.x) * step / steps;
-
-    const y =
-      previous.y +
-      (current.y - previous.y) * step / steps;
-
-    for (
-      let yy = Math.max(0, Math.floor(y - radius));
-      yy <= Math.min(
-        canvas.height - 1,
-        Math.ceil(y + radius)
-      );
-      yy++
-    ) {
-      for (
-        let xx = Math.max(0, Math.floor(x - radius));
-        xx <= Math.min(
-          canvas.width - 1,
-          Math.ceil(x + radius)
-        );
-        xx++
-      ) {
-        if (
-          (xx - x) ** 2 +
-          (yy - y) ** 2 >
-          radius ** 2
-        ) {
-          continue;
-        }
-
-        const i =
-          (yy * canvas.width + xx) * 4;
-
-        if (state.editorMode === "erase") {
-          data[i + 3] = 0;
-        } else {
-          for (let j = 0; j < 4; j++) {
-            data[i + j] = original[i + j];
-          }
-        }
-      }
+    const hero = createHero(name, png);
+    if (state.heroes.length === 1) {
+      welcomeHero(hero);
     }
   }
 
-  ctx.putImageData(image, 0, 0);
-  state.editorLastPoint = current;
+  $("editorModal").classList.remove("open");
+  state.editor = null;
+  renderHeroList();
+  setStatus("黏土生命已加入心智小宇宙！");
 }
 
-function cropEditedImage() {
-  const canvas = $("editCanvas");
-  const w = canvas.width;
-  const h = canvas.height;
+/* =============== HEROES =============== */
 
-  const pixels =
-    canvas.getContext("2d")
-      .getImageData(0, 0, w, h).data;
+function createHero(name, png) {
+  const hero = {
+    id: makeId(),
+    name,
+    original: png,
+    current: png,
+    transformed: null,
+    appearance: "",
+    skills: [],
+    x: rand(18, 72),
+    y: rand(30, 70),
+    vx: rand(-0.018, 0.018),
+    vy: rand(-0.012, 0.012),
+    action: null,
+    actionUntil: 0,
+    targetId: null,
+    skillUntil: 0,
+    phase: rand(0, Math.PI * 2),
+    element: document.createElement("img")
+  };
 
-  let left = w;
-  let top = h;
-  let right = -1;
-  let bottom = -1;
-
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      if (pixels[(y * w + x) * 4 + 3] > 10) {
-        left = Math.min(left, x);
-        right = Math.max(right, x);
-        top = Math.min(top, y);
-        bottom = Math.max(bottom, y);
-      }
-    }
-  }
-
-  if (right < left) {
-    throw new Error("圖片已全部透明");
-  }
-
-  left = Math.max(0, left - 5);
-  top = Math.max(0, top - 5);
-  right = Math.min(w - 1, right + 5);
-  bottom = Math.min(h - 1, bottom + 5);
-
-  const output =
-    document.createElement("canvas");
-
-  output.width = right - left + 1;
-  output.height = bottom - top + 1;
-
-  output.getContext("2d").drawImage(
-    canvas,
-    left,
-    top,
-    output.width,
-    output.height,
-    0,
-    0,
-    output.width,
-    output.height
+  hero.element.className = "hero";
+  hero.element.src = png;
+  hero.element.alt = name;
+  hero.element.addEventListener(
+    "click", () => selectHero(hero.id)
   );
 
-  return output.toDataURL("image/png");
+  $("actors").appendChild(hero.element);
+  state.heroes.push(hero);
+  selectHero(hero.id);
+  return hero;
 }
 
-/* ==========================================
-   主角管理
-   ========================================== */
-
-function createHeroElement(hero) {
-  const element =
-    document.createElement("div");
-
-  element.style.position = "absolute";
-  element.style.width = "145px";
-  element.style.height = "145px";
-  element.style.transformOrigin = "center";
-
-  const original =
-    document.createElement("img");
-
-  original.src = hero.original;
-  original.style.position = "absolute";
-  original.style.inset = "0";
-  original.style.width = "100%";
-  original.style.height = "100%";
-  original.style.objectFit = "contain";
-  original.style.filter =
-    "drop-shadow(0 5px 6px #236e8344)";
-
-  const transformed =
-    document.createElement("img");
-
-  transformed.style.position = "absolute";
-  transformed.style.inset = "0";
-  transformed.style.width = "100%";
-  transformed.style.height = "100%";
-  transformed.style.objectFit = "contain";
-  transformed.style.display = "none";
-
-  const name =
-    document.createElement("span");
-
-  name.textContent = hero.name;
-  name.style.position = "absolute";
-  name.style.bottom = "-20px";
-  name.style.left = "50%";
-  name.style.transform = "translateX(-50%)";
-  name.style.whiteSpace = "nowrap";
-  name.style.background = "#ffffffdd";
-  name.style.borderRadius = "10px";
-  name.style.padding = "4px 8px";
-  name.style.fontSize = "12px";
-
-  element.append(
-    original,
-    transformed,
-    name
-  );
-
-  $("actors").appendChild(element);
-
-  hero.element = element;
-  hero.originalElement = original;
-  hero.transformedElement = transformed;
-  hero.nameElement = name;
+function selectHero(id) {
+  state.selectedId = id;
+  renderHeroList();
 }
 
-function refreshHeroList() {
+function renderHeroList() {
   const list = $("heroList");
   const select = $("selectedHero");
-
-  list.replaceChildren();
-  select.replaceChildren();
-
-  for (const hero of state.heroes) {
-    const row = document.createElement("div");
-
-    row.style.display = "flex";
-    row.style.alignItems = "center";
-    row.style.gap = "8px";
-    row.style.padding = "6px";
-    row.style.marginBottom = "5px";
-    row.style.borderRadius = "12px";
-    row.style.background =
-      hero.id === state.selectedId
-        ? "#e6d7ff"
-        : "#f4efff";
-
-    const image =
-      document.createElement("img");
-
-    image.src = hero.original;
-    image.style.width = "44px";
-    image.style.height = "44px";
-    image.style.objectFit = "contain";
-
-    const button =
-      document.createElement("button");
-
-    button.textContent = hero.name;
-    button.style.flex = "1";
-
-    button.onclick = () => {
-      state.selectedId = hero.id;
-      refreshHeroList();
-    };
-
-    const rename =
-      document.createElement("button");
-
-    rename.textContent = "✏️";
-
-    rename.onclick = () => {
-      const value = prompt(
-        "幫黏土朋友取名字",
-        hero.name
-      );
-
-      if (value?.trim()) {
-        hero.name = value.trim().slice(0, 30);
-        hero.nameElement.textContent = hero.name;
-        refreshHeroList();
-      }
-    };
-
-    row.append(image, button, rename);
-    list.append(row);
-
-    const option =
-      document.createElement("option");
-
-    option.value = hero.id;
-    option.textContent = hero.name;
-
-    select.append(option);
-  }
+  list.innerHTML = "";
+  select.innerHTML = "";
 
   if (!state.heroes.length) {
-    list.textContent = "🌱 還沒有黏土主角";
+    select.innerHTML =
+      '<option value="">請先新增角色</option>';
+    $("appearance").textContent = "";
+    return;
+  }
+
+  for (const hero of state.heroes) {
+    const chip = document.createElement("button");
+    chip.className = "hero-chip" +
+      (hero.id === state.selectedId ? " active" : "");
+
+    const img = document.createElement("img");
+    img.src = hero.current;
+
+    const span = document.createElement("span");
+    span.textContent = hero.name;
+
+    chip.append(img, span);
+    chip.onclick = () => selectHero(hero.id);
+    list.appendChild(chip);
+
+    const option = document.createElement("option");
+    option.value = hero.id;
+    option.textContent = hero.name;
+    select.appendChild(option);
+
+    hero.element.classList.toggle(
+      "selected", hero.id === state.selectedId
+    );
   }
 
   select.value = state.selectedId || "";
+  $("appearance").textContent =
+    selectedHero()?.appearance || "";
 }
 
-function saveHeroFromEditor() {
-  const image = cropEditedImage();
-  const firstHero = state.heroes.length === 0;
-
-  let hero = state.heroes.find(
-    item => item.id === state.editorHeroId
-  );
-
-  if (hero) {
-    hero.original = image;
-    hero.transformed = null;
-    hero.originalElement.src = image;
-    hero.originalElement.style.display = "block";
-    hero.transformedElement.style.display = "none";
-  } else {
-    hero = {
-      id: makeId(),
-      name:
-        "黏土朋友" +
-        (state.heroes.length + 1),
-      original: image,
-      transformed: null,
-      appearance: "",
-      personality: "",
-      skills: [],
-      x:
-        0.25 +
-        (state.heroes.length % 3) * 0.2,
-      y:
-        0.4 +
-        (state.heroes.length % 2) * 0.15,
-      vx: 0.00045,
-      face: 1,
-      phase: Math.random() * Math.PI * 2,
-      action: null,
-      skillUntil: 0
-    };
-
-    createHeroElement(hero);
-    state.heroes.push(hero);
-  }
-
-  state.selectedId = hero.id;
-  state.editorHeroId = null;
-
-  modal("editorModal", false);
-  refreshHeroList();
-
-  setStatus("🌈 " + hero.name + " 已誕生！");
-
-  if (firstHero) {
-    welcomeHero(hero);
-  }
-}
-
-function removeSelectedHero() {
+function deleteHero() {
   const hero = selectedHero();
-
-  if (!hero) {
-    setStatus("請先選擇主角");
-    return;
-  }
-
-  if (!confirm("要移除 " + hero.name + " 嗎？")) {
-    return;
-  }
+  if (!hero) return;
+  if (!confirm("確定要刪除「" + hero.name + "」嗎？")) return;
 
   hero.element.remove();
-
-  state.heroes = state.heroes.filter(
-    item => item.id !== hero.id
-  );
-
-  state.selectedId =
-    state.heroes[0]?.id || null;
-
-  refreshHeroList();
+  state.heroes = state.heroes.filter(h => h.id !== hero.id);
+  state.selectedId = state.heroes[0]?.id || null;
+  renderHeroList();
 }
-
-/* ==========================================
-   AI 觀察黏土
-   ========================================== */
 
 async function inspectHero() {
   const hero = selectedHero();
-
-  if (!hero) {
-    setStatus("請先建立黏土主角");
-    return;
-  }
-
-  setStatus("🧠 AI 正在觀察黏土……");
-
-  const image =
-    await loadImageAsync(hero.original);
-
-  const canvas =
-    document.createElement("canvas");
-
-  const scale = Math.min(
-    1,
-    512 / Math.max(image.width, image.height)
-  );
-
-  canvas.width =
-    Math.round(image.width * scale);
-
-  canvas.height =
-    Math.round(image.height * scale);
-
-  canvas.getContext("2d").drawImage(
-    image,
-    0,
-    0,
-    canvas.width,
-    canvas.height
-  );
-
-  const result = await callAI("inspect", {
-    image: canvas.toDataURL("image/png")
-  });
-
-  hero.appearance = result.appearance || "";
-  hero.personality = result.personality || "";
-
-  $("appearance").textContent =
-    "🔍 " + hero.appearance +
-    "｜💭 " + hero.personality;
-
-  setStatus("✅ AI 已認識黏土主角");
-}
-
-/* ==========================================
-   AI 黏土變身
-   ========================================== */
-
-async function transformHero(hero, description) {
-  if (!hero) {
-    throw new Error("請先選擇黏土主角");
-  }
-
-  if (!description?.trim()) {
-    throw new Error("請描述想增加的造型");
-  }
-
-  setStatus("🎨 AI 正在製作黏土風格造型……");
-
-  const result = await callAI("transform", {
-    image: hero.original,
-    description
-  });
-
-  const accessory =
-    await loadImageAsync(result.image);
-
-  const original =
-    await loadImageAsync(hero.original);
-
-  const canvas =
-    document.createElement("canvas");
-
-  canvas.width = 1024;
-  canvas.height = 1024;
-
-  const ctx = canvas.getContext("2d");
-
-  ctx.clearRect(0, 0, 1024, 1024);
-
-  ctx.drawImage(
-    accessory,
-    0,
-    0,
-    1024,
-    1024
-  );
-
-  const scale = Math.min(
-    820 / original.width,
-    820 / original.height
-  );
-
-  const w = original.width * scale;
-  const h = original.height * scale;
-
-  ctx.drawImage(
-    original,
-    (1024 - w) / 2,
-    (1024 - h) / 2,
-    w,
-    h
-  );
-
-  hero.transformed =
-    canvas.toDataURL("image/png");
-
-  hero.transformedElement.src =
-    hero.transformed;
-
-  hero.transformedElement.style.display =
-    "block";
-
-  hero.originalElement.style.display =
-    "none";
-
-  setStatus("✨ 黏土造型變化完成");
-}
-
-function showOriginalHero() {
-  const hero = selectedHero();
   if (!hero) return;
 
-  hero.originalElement.style.display =
-    "block";
-
-  hero.transformedElement.style.display =
-    "none";
-
-  setStatus("↩️ 已切換回原始黏土造型");
+  setStatus("AI 正在觀察黏土角色...");
+  try {
+    const result = await callAI("inspect", {
+      image: hero.original
+    });
+    hero.appearance = result.appearance || "";
+    renderHeroList();
+    setStatus("AI 已完成角色外觀觀察");
+  } catch (error) {
+    setStatus(error.message);
+  }
 }
 
-function showTransformedHero() {
+async function transformHero(hero, description) {
+  if (!hero || !description) return;
+
+  setStatus("AI 正在製作黏土變身...");
+  try {
+    const result = await callAI("transform", {
+      image: hero.original,
+      description
+    });
+
+    if (!result.image) {
+      throw new Error("沒有收到變身圖片");
+    }
+
+    hero.transformed = result.image;
+    hero.current = result.image;
+    hero.element.src = hero.current;
+    renderHeroList();
+    setStatus("黏土變身完成！");
+  } catch (error) {
+    setStatus("變身失敗：" + error.message);
+  }
+}
+
+function restoreHero() {
   const hero = selectedHero();
-
-  if (!hero?.transformed) {
-    setStatus("目前還沒有 AI 造型");
-    return;
-  }
-
-  hero.originalElement.style.display =
-    "none";
-
-  hero.transformedElement.style.display =
-    "block";
-
-  setStatus("👀 正在顯示 AI 黏土造型");
+  if (!hero) return;
+  hero.current = hero.original;
+  hero.element.src = hero.original;
+  renderHeroList();
 }
 
-/* ==========================================
-   麥克風錄音與 WAV
-   ========================================== */
+function toggleHeroTransform() {
+  const hero = selectedHero();
+  if (!hero || !hero.transformed) return;
 
-function blobToBase64(blob) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-
-    reader.onload = () => {
-      resolve(
-        String(reader.result).split(",")[1]
-      );
-    };
-
-    reader.onerror = () => {
-      reject(new Error("錄音讀取失敗"));
-    };
-
-    reader.readAsDataURL(blob);
-  });
+  hero.current =
+    hero.current === hero.original
+      ? hero.transformed
+      : hero.original;
+  hero.element.src = hero.current;
+  renderHeroList();
 }
 
-async function convertAudioToWav(blob) {
-  const buffer = await blob.arrayBuffer();
-
-  const AudioContextClass =
-    window.AudioContext ||
-    window.webkitAudioContext;
-
-  const audioContext =
-    new AudioContextClass();
-
-  try {
-    const decoded =
-      await audioContext.decodeAudioData(buffer);
-
-    const sampleRate = 16000;
-    const length = Math.floor(
-      decoded.duration * sampleRate
-    );
-
-    const output =
-      new ArrayBuffer(44 + length * 2);
-
-    const view = new DataView(output);
-
-    function writeString(offset, value) {
-      for (let i = 0; i < value.length; i++) {
-        view.setUint8(
-          offset + i,
-          value.charCodeAt(i)
-        );
-      }
-    }
-
-    writeString(0, "RIFF");
-    view.setUint32(
-      4, 36 + length * 2, true
-    );
-
-    writeString(8, "WAVE");
-    writeString(12, "fmt ");
-
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);
-    view.setUint16(22, 1, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * 2, true);
-    view.setUint16(32, 2, true);
-    view.setUint16(34, 16, true);
-
-    writeString(36, "data");
-
-    view.setUint32(
-      40, length * 2, true
-    );
-
-    const channels = [];
-
-    for (
-      let i = 0;
-      i < decoded.numberOfChannels;
-      i++
-    ) {
-      channels.push(
-        decoded.getChannelData(i)
-      );
-    }
-
-    for (let i = 0; i < length; i++) {
-      const position =
-        i * decoded.sampleRate / sampleRate;
-
-      const a = Math.floor(position);
-
-      const b = Math.min(
-        a + 1,
-        decoded.length - 1
-      );
-
-      const fraction = position - a;
-
-      let sample = 0;
-
-      for (const channel of channels) {
-        sample +=
-          channel[a] * (1 - fraction) +
-          channel[b] * fraction;
-      }
-
-      sample /= channels.length;
-      sample = clamp(sample, -1, 1);
-
-      view.setInt16(
-        44 + i * 2,
-        sample < 0
-          ? sample * 32768
-          : sample * 32767,
-        true
-      );
-    }
-
-    return new Blob(
-      [output],
-      { type: "audio/wav" }
-    );
-  } finally {
-    await audioContext.close();
-  }
-}
-
-async function toggleRecording() {
-  if (state.recording) {
-    if (
-      state.recorder &&
-      state.recorder.state === "recording"
-    ) {
-      state.recorder.stop();
-    }
-    return;
-  }
-
-  if (!navigator.mediaDevices?.getUserMedia) {
-    setStatus("瀏覽器不支援麥克風");
-    return;
-  }
-
-  try {
-    const stream =
-      await navigator.mediaDevices.getUserMedia({
-        audio: true
-      });
-
-    const formats = [
-      "audio/mp4",
-      "audio/webm;codecs=opus",
-      "audio/webm"
-    ];
-
-    const supported = formats.find(
-      type => MediaRecorder.isTypeSupported(type)
-    );
-
-    const recorder = new MediaRecorder(
-      stream,
-      supported
-        ? { mimeType: supported }
-        : {}
-    );
-
-    state.audioStream = stream;
-    state.recorder = recorder;
-    state.audioChunks = [];
-    state.recording = true;
-
-    recorder.ondataavailable = event => {
-      if (event.data.size > 0) {
-        state.audioChunks.push(event.data);
-      }
-    };
-
-    recorder.onstop = finishRecording;
-
-    recorder.start();
-
-    $("micButton").textContent =
-      "⏹️ 結束說話";
-
-    setStatus("🎤 正在聆聽孩子說話……");
-  } catch (error) {
-    setStatus("❌ 麥克風：" + error.message);
-  }
-}
-
-async function finishRecording() {
-  state.recording = false;
-
-  $("micButton").textContent =
-    "🎙️ 開始說話";
-
-  state.audioStream?.getTracks().forEach(
-    track => track.stop()
-  );
-
-  state.audioStream = null;
-
-  try {
-    const blob = new Blob(
-      state.audioChunks,
-      {
-        type:
-          state.recorder?.mimeType ||
-          "audio/webm"
-      }
-    );
-
-    if (!blob.size) {
-      throw new Error("沒有收到錄音");
-    }
-
-    setStatus("🧠 AI 正在辨識語音……");
-
-    const wav =
-      await convertAudioToWav(blob);
-
-    const base64 =
-      await blobToBase64(wav);
-
-    if (base64.length > 7000000) {
-      throw new Error(
-        "錄音過長，請縮短到約15秒"
-      );
-    }
-
-    const result = await callAI(
-      "transcribe",
-      { audio: base64 }
-    );
-
-    $("chatInput").value =
-      result.text || "";
-
-    if (result.text?.trim()) {
-      await sendStory();
-    } else {
-      setStatus("沒有辨識到語音內容");
-    }
-  } catch (error) {
-    setStatus(
-      "❌ 語音辨識：" + error.message
-    );
-  } finally {
-    state.recorder = null;
-    state.audioChunks = [];
-  }
-}
-
-/* ==========================================
-   故事、技能與角色互動
-   ========================================== */
+/* =============== STORY & SKILLS =============== */
 
 function performAction(action) {
   const hero = state.heroes.find(
-    item => item.id === action.heroId
+    h => h.id === action.heroId
   );
-
   if (!hero) return;
 
-  hero.action = {
-    type: action.type,
-    targetId: action.targetId || "",
-    until:
-      performance.now() +
-      (action.duration || 6) * 1000
-  };
+  hero.action = action.type;
+  hero.targetId = action.targetId || null;
+  hero.actionUntil = Date.now() +
+    clamp(Number(action.duration) || 3500, 500, 12000);
 
-  if (action.type === "laser") {
-    hero.skillUntil =
-      performance.now() + 4000;
+  if (action.type === "laser" ||
+      action.type === "sparkle") {
+    hero.skillUntil = hero.actionUntil;
   }
 }
 
@@ -1380,94 +826,44 @@ function addScene(scene) {
   state.scenes.push({
     type: scene.type,
     description: scene.description || "",
-    start: performance.now(),
-    duration:
-      (scene.duration || 7) * 1000
+    until: Date.now() +
+      clamp(Number(scene.duration) || 5000, 1000, 15000),
+    start: Date.now()
   });
 }
 
-async function sendStory() {
-  if (state.busy) return;
-
-  const hero = selectedHero();
-  const message =
-    $("chatInput").value.trim();
-
-  if (!hero) {
-    setStatus("請先創造黏土主角");
-    return;
-  }
-
-  if (!message) return;
+async function sendStory(message) {
+  const text = String(message || "").trim();
+  if (!text || !state.heroes.length || state.busy) return;
 
   state.busy = true;
-  $("sendButton").disabled = true;
+  addChat("孩子", text, "user");
   $("chatInput").value = "";
-
-  addChat("🧒 孩子", message);
-
-  setStatus("🤖 AI 正在理解故事……");
+  setStatus("AI 正在理解你的想像...");
 
   try {
-    const result = await callAI(
-      "story",
-      {
-        message,
-        selectedHeroId: hero.id,
-        heroes: state.heroes.map(item => ({
-          id: item.id,
-          name: item.name,
-          appearance: item.appearance,
-          personality: item.personality,
-          skills: item.skills.map(
-            skill => skill.name
-          )
-        })),
-        history: state.history.slice(-12),
-        activeScenes: state.scenes.map(
-          scene => scene.type
-        )
-      }
-    );
+    const result = await callAI("story", {
+      message: text,
+      selectedHeroId: state.selectedId,
+      heroes: state.heroes.map(h => ({
+        id: h.id,
+        name: h.name,
+        appearance: h.appearance,
+        skills: h.skills
+      })),
+      history: state.history.slice(-8),
+      activeScenes: state.scenes.map(s => s.type)
+    });
 
-    const speaker = state.heroes.find(
-      item => item.id === result.speakerId
-    ) || hero;
+    const speaker =
+      state.heroes.find(h => h.id === result.speakerId) ||
+      selectedHero();
 
-    const reply =
-      result.reply ||
-      "哇！我們一起試試看吧！";
+    const reply = result.reply || "好呀！我們一起來試試！";
 
-    addChat(
-      "🐠 " + speaker.name,
-      reply,
-      true
-    );
-
-    setSpeech(
-      "🐠 " + speaker.name +
-      "：" + reply
-    );
-
+    addChat(speaker.name, reply);
+    showBubble(reply);
     speak(reply);
-
-    state.history.push(
-      {
-        role: "user",
-        content: message
-      },
-      {
-        role: "assistant",
-        content: reply
-      }
-    );
-
-    if (state.history.length > 24) {
-      state.history.splice(
-        0,
-        state.history.length - 24
-      );
-    }
 
     for (const action of result.actions || []) {
       performAction(action);
@@ -1478,941 +874,623 @@ async function sendStory() {
     }
 
     for (const skill of result.skills || []) {
-      const target = state.heroes.find(
-        item => item.id === skill.heroId
+      const hero = state.heroes.find(
+        h => h.id === skill.heroId
       );
+      if (!hero) continue;
 
-      if (!target) continue;
+      hero.skills.push(skill);
+      hero.skillUntil = Date.now() + 5000;
 
-      target.skills.push(skill);
-      target.skillUntil =
-        performance.now() + 4000;
-    }
-
-    for (
-      const transformation of
-      result.transforms || []
-    ) {
-      const target = state.heroes.find(
-        item =>
-          item.id === transformation.heroId
-      );
-
-      if (!target) continue;
-
-      try {
-        await transformHero(
-          target,
-          transformation.description
-        );
-      } catch (error) {
-        setStatus(
-          "⚠️ AI 造型生成失敗：" +
-          error.message
-        );
+      if (skill.type === "laser" ||
+          skill.type === "sparkle") {
+        performAction({
+          heroId: hero.id,
+          type: skill.type,
+          duration: 4500
+        });
       }
     }
 
-    setStatus("🌈 故事已更新");
-  } catch (error) {
-    setStatus("❌ " + error.message);
+    for (const transform of result.transforms || []) {
+      const hero = state.heroes.find(
+        h => h.id === transform.heroId
+      );
+      if (hero) {
+        await transformHero(hero, transform.description);
+      }
+    }
 
-    addChat(
-      "⚠️ 系統",
-      error.message,
-      true
-    );
+    state.history.push({
+      user: text,
+      speaker: speaker.name,
+      reply
+    });
+
+    setStatus("你的故事正在發生！");
+
+  } catch (error) {
+    setStatus("AI 故事失敗：" + error.message);
+    showBubble("我還在想故事，再跟我說一次好嗎？");
   } finally {
     state.busy = false;
-    $("sendButton").disabled = false;
   }
 }
 
-/* ==========================================
-   p5.js 世界
-   ========================================== */
+/* =============== MICROPHONE =============== */
 
-function startP5World() {
-  if (typeof p5 === "undefined") {
-    setStatus("❌ p5.js 載入失敗");
+async function toggleMicrophone() {
+  if (state.recording) {
+    state.recorder.stop();
+    state.recording = false;
+    $("micButton").textContent = "🎤 說話";
     return;
   }
 
-  new p5(p => {
-    p.setup = () => {
-      const world = $("world");
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: true
+    });
 
-      p.createCanvas(
-        world.clientWidth,
-        world.clientHeight
-      ).parent("scene");
+    state.micStream = stream;
+    state.audioChunks = [];
+
+    const recorder = new MediaRecorder(stream);
+    state.recorder = recorder;
+
+    recorder.ondataavailable = event => {
+      if (event.data.size) {
+        state.audioChunks.push(event.data);
+      }
     };
 
-    p.draw = () => {
-      const time =
-        performance.now() / 1000;
+    recorder.onstop = async () => {
+      stream.getTracks().forEach(t => t.stop());
 
-      p.clear();
+      try {
+        setStatus("正在辨識孩子說的話...");
+        const blob = new Blob(state.audioChunks, {
+          type: recorder.mimeType
+        });
+        const wav = await convertToWav(blob);
+        const audio = await blobToBase64(wav);
+        const result = await callAI("transcribe", { audio });
 
-      drawEnvironment(p, time);
-      animateHeroes(p, time);
-      drawScenes(p, time);
+        if (result.text) {
+          await sendStory(result.text);
+        } else {
+          setStatus("沒有聽清楚，請再說一次");
+        }
+      } catch (error) {
+        setStatus("語音辨識失敗：" + error.message);
+      }
     };
 
-    p.windowResized = () => {
-      const world = $("world");
+    recorder.start();
+    state.recording = true;
+    $("micButton").textContent = "⏹ 結束錄音";
+    setStatus("正在聽你說話...");
 
-      p.resizeCanvas(
-        world.clientWidth,
-        world.clientHeight
-      );
-    };
+  } catch (error) {
+    setStatus("麥克風無法使用：" + error.message);
+  }
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
   });
 }
 
-function drawEnvironment(p, time) {
-  p.push();
-  p.noStroke();
+async function convertToWav(blob) {
+  const buffer = await blob.arrayBuffer();
+  const AudioCtx = window.AudioContext ||
+    window.webkitAudioContext;
+  const ctx = new AudioCtx();
+  const decoded = await ctx.decodeAudioData(buffer);
+  const input = decoded.getChannelData(0);
+  const targetRate = 16000;
+  const outputLength = Math.ceil(
+    input.length * targetRate / decoded.sampleRate
+  );
+  const samples = new Float32Array(outputLength);
 
+  for (let i = 0; i < outputLength; i++) {
+    const position = i * decoded.sampleRate / targetRate;
+    const left = Math.floor(position);
+    const right = Math.min(input.length - 1, left + 1);
+    const t = position - left;
+    samples[i] = input[left] * (1 - t) + input[right] * t;
+  }
+
+  await ctx.close();
+
+  const bytes = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(bytes);
+
+  function str(offset, value) {
+    for (let i = 0; i < value.length; i++) {
+      view.setUint8(offset + i, value.charCodeAt(i));
+    }
+  }
+
+  str(0, "RIFF");
+  view.setUint32(4, 36 + samples.length * 2, true);
+  str(8, "WAVE");
+  str(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, targetRate, true);
+  view.setUint32(28, targetRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  str(36, "data");
+  view.setUint32(40, samples.length * 2, true);
+
+  for (let i = 0; i < samples.length; i++) {
+    const sample = clamp(samples[i], -1, 1);
+    view.setInt16(
+      44 + i * 2,
+      sample < 0 ? sample * 32768 : sample * 32767,
+      true
+    );
+  }
+
+  return new Blob([bytes], { type: "audio/wav" });
+}
+
+/* =============== P5 WORLD =============== */
+
+let particles = [];
+
+function setup() {
+  const world = $("world");
+  const canvas = createCanvas(
+    world.clientWidth, world.clientHeight
+  );
+  canvas.parent("scene");
+  canvas.style("display", "block");
+
+  for (let i = 0; i < 65; i++) {
+    particles.push({
+      x: random(width),
+      y: random(height),
+      r: random(2, 8),
+      speed: random(.3, 1.4)
+    });
+  }
+}
+
+function windowResized() {
+  resizeCanvas(
+    $("world").clientWidth,
+    $("world").clientHeight
+  );
+}
+
+function draw() {
+  drawWorld();
+  drawScenes();
+  updateHeroes();
+  drawSkills();
+}
+
+function drawWorld() {
   if (state.world === "ocean") {
-    for (let i = 0; i < 28; i++) {
-      const x =
-        (i * 137 + Math.sin(time + i) * 18) %
-        p.width;
+    background(24, 123, 177);
 
-      const y =
-        (
-          p.height -
-          (time * 22 + i * 89) %
-          p.height +
-          p.height
-        ) % p.height;
-
-      p.fill(255, 255, 255, 55);
-      p.circle(x, y, 8 + (i % 5) * 4);
+    noStroke();
+    for (let y = 0; y < height; y += 5) {
+      fill(20, 105, 166, map(y, 0, height, 0, 85));
+      rect(0, y, width, 6);
     }
 
-    p.fill("#78c6b5");
+    for (const p of particles) {
+      noFill();
+      stroke(195, 240, 255, 100);
+      strokeWeight(1.5);
+      circle(p.x, p.y, p.r * 2);
+      p.y -= p.speed;
+      if (p.y < -10) {
+        p.y = height + 10;
+        p.x = random(width);
+      }
+    }
 
-    for (let i = 0; i < 14; i++) {
-      const x =
-        i * p.width / 13;
+    noStroke();
+    fill(225, 202, 146);
+    ellipse(width / 2, height + 28, width * 1.6, 110);
 
-      p.ellipse(
-        x,
-        p.height + 10,
-        26,
-        75 + Math.sin(time + i) * 17
-      );
+    for (let x = 20; x < width; x += 85) {
+      stroke(30, 163, 120, 170);
+      strokeWeight(6);
+      noFill();
+      const sway = sin(frameCount * .03 + x) * 12;
+      bezier(x, height, x + sway, height - 55,
+        x - sway, height - 95, x + sway, height - 125);
     }
   }
 
   if (state.world === "forest") {
-    p.fill("#85c77c");
+    background(171, 225, 190);
+    noStroke();
+    fill(109, 177, 118);
+    rect(0, height * .76, width, height * .24);
 
-    p.rect(
-      0,
-      p.height * 0.8,
-      p.width,
-      p.height * 0.2
-    );
-
-    for (let i = 0; i < 8; i++) {
-      const x =
-        (i + 0.5) * p.width / 8;
-
-      p.fill("#96725d");
-
-      p.rect(
-        x - 6,
-        p.height * 0.56,
-        12,
-        p.height * 0.25
-      );
-
-      p.fill("#7bc488");
-      p.circle(
-        x,
-        p.height * 0.53,
-        80
-      );
+    for (let x = 35; x < width; x += 145) {
+      fill(116, 89, 62);
+      rect(x, height * .43, 24, height * .39);
+      fill(70, 151, 90, 220);
+      circle(x + 12, height * .37, 140);
+      fill(101, 180, 112, 180);
+      circle(x - 20, height * .32, 90);
     }
   }
 
   if (state.world === "space") {
-    p.fill("#fff6b0");
+    background(17, 22, 61);
+    noStroke();
 
-    for (let i = 0; i < 80; i++) {
-      p.circle(
-        i * 131 % p.width,
-        i * 97 % p.height,
-        2 + i % 3
-      );
+    for (const p of particles) {
+      fill(255, 255, 255, 130 + sin(frameCount * .04 + p.x) * 90);
+      circle(p.x, p.y, p.r * .55);
     }
-  }
 
-  p.pop();
+    fill(115, 100, 201, 65);
+    ellipse(width * .72, height * .3, 280, 220);
+    fill(236, 183, 107);
+    circle(width * .82, height * .22, 85);
+  }
 }
 
-function animateHeroes(p, time) {
-  const now = performance.now();
+function drawScenes() {
+  const now = Date.now();
+  state.scenes = state.scenes.filter(s => s.until > now);
+
+  for (const scene of state.scenes) {
+    const elapsed = (now - scene.start) / 1000;
+
+    push();
+
+    if (scene.type === "rain" ||
+        scene.type === "storm" ||
+        scene.type === "candyRain") {
+      for (let i = 0; i < 85; i++) {
+        const x = (i * 79 + elapsed * 28) % width;
+        const y = (i * 61 + elapsed * 210) % height;
+
+        if (scene.type === "candyRain") {
+          noStroke();
+          fill(i % 2 ? "#ff80bd" : "#ffdb63");
+          circle(x, y, 9);
+        } else {
+          stroke(200, 239, 255, 180);
+          strokeWeight(2);
+          line(x, y, x - 7, y + 20);
+        }
+      }
+    }
+
+    if (scene.type === "rainbow") {
+      noFill();
+      strokeWeight(11);
+      const colors = [
+        "#f66b77", "#ffc66b", "#fff28b",
+        "#88e5a1", "#80c9ff", "#bca4f2"
+      ];
+      colors.forEach((c, i) => {
+        stroke(c);
+        arc(width / 2, height * .9,
+          350 - i * 24, 350 - i * 24,
+          PI, TWO_PI);
+      });
+    }
+
+    if (scene.type === "egg") {
+      noStroke();
+      fill("#fff3d5");
+      ellipse(width * .5, height * .7, 85, 112);
+      stroke("#d4a5a0");
+      strokeWeight(3);
+      line(width * .47, height * .68,
+        width * .5, height * .72);
+      line(width * .5, height * .72,
+        width * .53, height * .66);
+    }
+
+    if (scene.type === "treasure") {
+      noStroke();
+      fill("#9d5d33");
+      rect(width * .46, height * .75, 105, 60, 12);
+      fill("#ffe477");
+      rect(width * .48, height * .76, 18, 60);
+    }
+
+    if (scene.type === "night") {
+      noStroke();
+      fill(0, 10, 50, 120);
+      rect(0, 0, width, height);
+    }
+
+    if (scene.type === "sparkle") {
+      for (let i = 0; i < 25; i++) {
+        fill(255, 240, 140, 160);
+        noStroke();
+        circle(
+          (i * 83 + elapsed * 17) % width,
+          (i * 47 + sin(elapsed + i) * 30) % height,
+          4 + i % 5
+        );
+      }
+    }
+
+    if (scene.description) {
+      noStroke();
+      fill(255, 255, 255, 200);
+      textAlign(CENTER);
+      textSize(15);
+      text(scene.description, width / 2, height - 35);
+    }
+
+    pop();
+  }
+}
+
+function updateHeroes() {
+  const now = Date.now();
 
   for (const hero of state.heroes) {
-    const action =
-      hero.action?.until > now
-        ? hero.action
-        : null;
-
-    const type =
-      action?.type || "swim";
+    if (hero.actionUntil < now) {
+      hero.action = null;
+    }
 
     const target = state.heroes.find(
-      item =>
-        item.id === action?.targetId
+      h => h.id === hero.targetId
     );
 
-    let dx = hero.vx;
-    let dy =
-      Math.sin(time * 2 + hero.phase) *
-      0.00025;
-
-    let rotation = 0;
-    let scale = 1;
-
-    if (
-      type === "stop" ||
-      type === "hide"
-    ) {
-      dx = 0;
-      dy = 0;
-    }
-
-    if (type === "dance") {
-      rotation =
-        Math.sin(time * 6) * 25;
-
-      scale =
-        1 + Math.sin(time * 6) * 0.08;
-    }
-
-    if (type === "spin") {
-      rotation =
-        time * 170 % 360;
-    }
-
-    if (
-      type === "jump" ||
-      type === "bounce"
-    ) {
-      dy =
-        -Math.abs(Math.sin(time * 5)) *
-        0.001;
-    }
-
-    if (type === "fly") {
-      dy -= 0.0007;
-    }
-
-    if (type === "shake") {
-      rotation =
-        Math.sin(time * 15) * 12;
-    }
-
-    if (
-      target &&
-      ["follow", "meet", "circle"].includes(type)
-    ) {
-      const offsetX =
-        type === "circle"
-          ? Math.cos(time * 2) * 0.14
-          : 0.1;
-
-      const offsetY =
-        type === "circle"
-          ? Math.sin(time * 2) * 0.14
-          : 0;
-
-      dx =
-        (target.x + offsetX - hero.x) *
-        0.018;
-
-      dy =
-        (target.y + offsetY - hero.y) *
-        0.018;
-    }
-
-    hero.x += dx;
-    hero.y += dy;
-
-    if (hero.x > 0.92) {
-      hero.x = 0.92;
-      hero.vx = -Math.abs(hero.vx);
-      hero.face = -1;
-    }
-
-    if (hero.x < 0.08) {
-      hero.x = 0.08;
-      hero.vx = Math.abs(hero.vx);
-      hero.face = 1;
-    }
-
-    hero.y = clamp(
-      hero.y, 0.12, 0.87
-    );
-
-    hero.element.style.left =
-      hero.x * 100 + "%";
-
-    hero.element.style.top =
-      hero.y * 100 + "%";
-
-    hero.element.style.transform =
-      "translate(-50%, -50%) " +
-      "rotate(" + rotation + "deg) " +
-      "scale(" +
-      hero.face * scale +
-      "," +
-      scale +
-      ")";
-
-    if (hero.skillUntil > now) {
-      drawHeroSkill(p, hero, time);
-    }
-  }
-}
-
-function drawHeroSkill(p, hero, time) {
-  const skill = hero.skills.at(-1);
-  if (!skill) return;
-
-  const x = hero.x * p.width;
-  const y = hero.y * p.height;
-
-  const color =
-    skill.color || "#ff66cc";
-
-  p.push();
-
-  if (
-    ["laser", "lightning", "rainbow"].includes(
-      skill.type
-    )
-  ) {
-    p.stroke("white");
-    p.strokeWeight(11);
-
-    p.line(
-      x,
-      y - 16,
-      x + hero.face * 240,
-      y - 16
-    );
-
-    p.stroke(color);
-    p.strokeWeight(5);
-
-    p.line(
-      x,
-      y - 16,
-      x + hero.face * 240,
-      y - 16
-    );
-  } else if (skill.type === "glow") {
-    p.noFill();
-    p.stroke(color);
-    p.strokeWeight(5);
-
-    p.circle(
-      x,
-      y,
-      150 + Math.sin(time * 6) * 15
-    );
-  } else {
-    for (let i = 0; i < 5; i++) {
-      const angle =
-        time * 3 + i * Math.PI * 2 / 5;
-
-      p.noStroke();
-      p.fill(color);
-
-      p.circle(
-        x + Math.cos(angle) * 70,
-        y + Math.sin(angle) * 70,
-        12
-      );
-    }
-  }
-
-  p.pop();
-}
-
-function drawEgg(p, x, y, progress, time) {
-  p.push();
-
-  p.translate(x, y);
-
-  p.rotate(
-    Math.sin(time * 10) *
-    (progress > 0.6 ? 0.12 : 0.03)
-  );
-
-  p.noStroke();
-  p.fill("#fff1c4");
-  p.ellipse(0, 0, 80, 100);
-
-  if (progress > 0.5) {
-    p.stroke("#c49471");
-    p.strokeWeight(3);
-    p.noFill();
-
-    p.beginShape();
-    p.vertex(-36, 5);
-    p.vertex(-23, -8);
-    p.vertex(-8, 7);
-    p.vertex(7, -8);
-    p.vertex(20, 5);
-    p.vertex(36, -5);
-    p.endShape();
-  }
-
-  if (progress > 0.8) {
-    p.noStroke();
-    p.fill(255, 238, 149, 160);
-
-    p.circle(
-      0,
-      -10,
-      90 + Math.sin(time * 10) * 20
-    );
-  }
-
-  p.pop();
-}
-
-function drawScenes(p, time) {
-  const now = performance.now();
-
-  for (
-    let i = state.scenes.length - 1;
-    i >= 0;
-    i--
-  ) {
-    const scene = state.scenes[i];
-
-    const progress =
-      (now - scene.start) /
-      scene.duration;
-
-    const x = p.width * 0.5;
-    const y = p.height * 0.58;
-
-    p.push();
-
-    switch (scene.type) {
-      case "egg":
-        drawEgg(
-          p, x, y, progress, time
-        );
+    switch (hero.action) {
+      case "dance":
+        hero.x += sin(frameCount * .16 + hero.phase) * .18;
         break;
-
-      case "rain":
-      case "candyRain":
-        for (let j = 0; j < 90; j++) {
-          const xx =
-            (j * 89 + time * 35) %
-            p.width;
-
-          const yy =
-            (j * 127 + time * 200) %
-            p.height;
-
-          if (scene.type === "rain") {
-            p.stroke("#e5faff");
-            p.strokeWeight(2);
-
-            p.line(
-              xx, yy,
-              xx - 5, yy + 16
-            );
-          } else {
-            p.noStroke();
-
-            p.fill(
-              [
-                "#ff98ba",
-                "#ffdf86",
-                "#b4a0ff",
-                "#a5e8cb"
-              ][j % 4]
-            );
-
-            p.circle(xx, yy, 12);
-          }
+      case "spin":
+        break;
+      case "fly":
+        hero.y -= .09;
+        break;
+      case "jump":
+        hero.y += sin(frameCount * .18) * .28;
+        break;
+      case "follow":
+      case "meet":
+        if (target) {
+          hero.x += Math.sign(target.x - hero.x) * .08;
+          hero.y += Math.sign(target.y - hero.y) * .06;
         }
         break;
-
-      case "rainbow":
-        p.noFill();
-        p.strokeWeight(10);
-
-        [
-          "#ff8b9e",
-          "#ffba75",
-          "#ffe98a",
-          "#9de1ac",
-          "#95c8ff",
-          "#c3a2f2"
-        ].forEach((color, j) => {
-          p.stroke(color);
-
-          p.arc(
-            p.width / 2,
-            p.height * 0.9,
-            p.width * 0.7 - j * 20,
-            p.height * 0.9 - j * 20,
-            Math.PI,
-            Math.PI * 2
-          );
-        });
+      case "circle":
+        hero.x += cos(frameCount * .06 + hero.phase) * .16;
+        hero.y += sin(frameCount * .06 + hero.phase) * .16;
         break;
-
-      case "treasure":
-        p.noStroke();
-        p.fill("#a9784c");
-
-        p.rect(
-          x - 45,
-          y - 20,
-          90,
-          55,
-          7
-        );
-
-        p.fill("#ffe28c");
-
-        p.rect(
-          x - 45,
-          y - 24,
-          90,
-          16,
-          6
-        );
-
-        p.circle(x, y + 10, 15);
+      case "stop":
         break;
-
-      case "night":
-        p.noStroke();
-        p.fill(18, 26, 70, 100);
-        p.rect(
-          0, 0,
-          p.width, p.height
-        );
-        break;
-
-      case "storm":
-        p.stroke("#d5e5ff");
-        p.strokeWeight(3);
-
-        for (let j = 0; j < 70; j++) {
-          const xx =
-            (j * 101 + time * 60) %
-            p.width;
-
-          const yy =
-            (j * 89 + time * 260) %
-            p.height;
-
-          p.line(
-            xx, yy,
-            xx - 12, yy + 23
-          );
-        }
-        break;
-
       default:
-        for (let j = 0; j < 12; j++) {
-          const angle =
-            time * 2 +
-            j * Math.PI / 6;
-
-          p.noStroke();
-          p.fill("#fff2a2");
-
-          p.circle(
-            x + Math.cos(angle) * 80,
-            y + Math.sin(angle) * 80,
-            8
-          );
-        }
+        hero.x += hero.vx;
+        hero.y += hero.vy;
+        if (hero.x < 9 || hero.x > 84) hero.vx *= -1;
+        if (hero.y < 18 || hero.y > 77) hero.vy *= -1;
     }
 
-    p.pop();
+    hero.x = clamp(hero.x, 5, 85);
+    hero.y = clamp(hero.y, 13, 80);
 
-    if (progress > 1) {
-      state.scenes.splice(i, 1);
+    const bob = sin(frameCount * .04 + hero.phase) * 7;
+    const rotation = hero.action === "spin"
+      ? frameCount * 7
+      : hero.action === "dance"
+        ? sin(frameCount * .15) * 15
+        : sin(frameCount * .025 + hero.phase) * 4;
 
-      if (scene.type === "egg") {
-        setSpeech(
-          "🥚✨ 蛋孵化了！接下來會發生什麼呢？"
+    hero.element.style.left = hero.x + "%";
+    hero.element.style.top = hero.y + "%";
+    hero.element.style.transform =
+      `translate(-50%,-50%) translateY(${bob}px) rotate(${rotation}deg)`;
+  }
+}
+
+function drawSkills() {
+  const now = Date.now();
+
+  for (const hero of state.heroes) {
+    if (hero.skillUntil < now) continue;
+
+    const skill = hero.skills.at(-1);
+    const type = hero.action === "laser"
+      ? "laser"
+      : hero.action === "sparkle"
+        ? "sparkle"
+        : skill?.type || "sparkle";
+
+    const x = width * hero.x / 100;
+    const y = height * hero.y / 100;
+    const color = skill?.color || "#ff5d7d";
+
+    push();
+    if (type === "laser") {
+      stroke(color);
+      strokeWeight(8);
+      line(x + 30, y - 20, x + 240, y - 45);
+      stroke(255, 255, 255, 200);
+      strokeWeight(2);
+      line(x + 30, y - 20, x + 240, y - 45);
+    } else {
+      noStroke();
+      for (let i = 0; i < 16; i++) {
+        fill(i % 2 ? "#ffdd78" : "#fff");
+        const angle = frameCount * .05 + i * TWO_PI / 16;
+        circle(
+          x + cos(angle) * 90,
+          y + sin(angle) * 75,
+          5 + i % 5
         );
       }
     }
+    pop();
   }
 }
 
-/* ==========================================
-   介面按鈕
-   ========================================== */
+/* =============== UI EVENTS =============== */
 
-function setupButtons() {
-  addClick("startButton", () => {
-    modal("startScreen", false);
+function bindEvents() {
+  $("startButton").onclick = () => {
+    state.started = true;
+    $("startScreen").style.display = "none";
+    setStatus("歡迎來到心智小宇宙！");
+  };
 
-    if ("speechSynthesis" in window) {
-      const unlock =
-        new SpeechSynthesisUtterance(" ");
-      speechSynthesis.speak(unlock);
-    }
+  $("mobileToggle").onclick = () =>
+    $("sidebar").classList.toggle("open");
 
-    setSpeech(
-      "🌈 拍下你的第一個黏土朋友吧！"
-    );
-  });
+  $("openCamera").onclick = openCamera;
 
-  addClick("openCamera", openCamera);
+  $("closeCamera").onclick = () => {
+    stopCamera();
+    $("cameraModal").classList.remove("open");
+  };
 
-  addClick("captureButton", capturePhoto);
+  $("captureButton").onclick = capturePhoto;
 
-  addClick("closeCamera", closeCamera);
-
-  addClick("retryCamera", openCamera);
-
-  addClick("switchCamera", () => {
-    state.cameraFacing =
-      state.cameraFacing === "environment"
+  $("switchCamera").onclick = () => {
+    state.facingMode =
+      state.facingMode === "environment"
         ? "user"
         : "environment";
+    openCamera();
+  };
 
-    return openCamera();
-  });
+  $("retryCamera").onclick = openCamera;
 
-  addClick("uploadPhoto", () => {
-    $("photoFile").click();
-  });
+  $("uploadPhoto").onclick = () => $("photoFile").click();
 
-  $("photoFile").addEventListener(
-    "change",
-    async event => {
-      const file =
-        event.target.files?.[0];
+  $("photoFile").onchange = event => {
+    uploadPhoto(event.target.files[0]);
+    event.target.value = "";
+  };
 
-      event.target.value = "";
+  $("closeEditor").onclick = () =>
+    $("editorModal").classList.remove("open");
 
-      if (!file) return;
+  $("aiRemoveBg").onclick = aiRemoveBackground;
+  $("removeBg").onclick = quickRemoveBackground;
+  $("restoreOriginalPhoto").onclick = restoreOriginalPhoto;
+  $("undoEdit").onclick = undoEdit;
+  $("saveEditor").onclick = saveEditor;
 
-      state.editorHeroId = null;
+  $("eraseMode").onclick = () => {
+    state.brushMode = "erase";
+    $("editorStatus").textContent = "橡皮擦模式";
+  };
 
-      try {
-        await openEditor(
-          await readFileAsDataURL(file)
-        );
-      } catch (error) {
-        setStatus("❌ " + error.message);
-      }
-    }
-  );
-
-  addClick("editHero", async () => {
-    const hero = selectedHero();
-
-    if (!hero) {
-      setStatus("請先選擇主角");
-      return;
-    }
-
-    state.editorHeroId = hero.id;
-
-    await openEditor(hero.original);
-  });
-
-  addClick(
-    "deleteHero",
-    removeSelectedHero
-  );
-
-  addClick("inspectHero", inspectHero);
-
-  addClick(
-    "removeBg",
-    autoRemoveBackground
-  );
-
-  addClick("eraseMode", () => {
-    state.editorMode = "erase";
-    setStatus("🧽 擦除模式");
-  });
-
-  addClick("restoreMode", () => {
-    state.editorMode = "restore";
-    setStatus("🖌️ 還原模式");
-  });
-
-  addClick("undoEdit", undoEditor);
-
-  addClick(
-    "saveEditor",
-    saveHeroFromEditor
-  );
-
-  addClick("closeEditor", () => {
-    modal("editorModal", false);
-  });
+  $("restoreMode").onclick = () => {
+    state.brushMode = "restore";
+    $("editorStatus").textContent = "恢復原照片筆刷模式";
+  };
 
   const canvas = $("editCanvas");
 
-  canvas.addEventListener(
-    "pointerdown",
-    event => {
-      event.preventDefault();
-
-      saveEditorHistory();
-
-      state.editorPainting = true;
-
-      state.editorLastPoint =
-        editorPointer(event);
-
-      canvas.setPointerCapture(
-        event.pointerId
-      );
-
-      paintEditor(event);
-    }
-  );
-
-  canvas.addEventListener(
-    "pointermove",
-    paintEditor
-  );
-
-  for (const eventName of [
-    "pointerup",
-    "pointercancel",
-    "lostpointercapture"
-  ]) {
-    canvas.addEventListener(
-      eventName,
-      () => {
-        state.editorPainting = false;
-        state.editorLastPoint = null;
-      }
-    );
-  }
-
-  addClick(
-    "micButton",
-    toggleRecording
-  );
-
-  addClick(
-    "sendButton",
-    sendStory
-  );
-
-  addClick("voiceButton", () => {
-    state.voiceEnabled =
-      !state.voiceEnabled;
-
-    $("voiceButton").textContent =
-      "🔊 語音：" +
-      (state.voiceEnabled ? "開" : "關");
-
-    if (!state.voiceEnabled) {
-      speechSynthesis.cancel();
-    }
+  canvas.addEventListener("pointerdown", event => {
+    painting = true;
+    pushUndo();
+    canvas.setPointerCapture(event.pointerId);
+    editorPointer(event);
   });
 
-  addClick("stopVoice", () => {
-    if ("speechSynthesis" in window) {
-      speechSynthesis.cancel();
-    }
-
-    if (
-      state.recorder?.state === "recording"
-    ) {
-      state.recorder.stop();
-    }
+  canvas.addEventListener("pointermove", event => {
+    if (painting) editorPointer(event);
   });
 
-  $("selectedHero").addEventListener(
-    "change",
-    event => {
-      state.selectedId =
-        event.target.value;
+  canvas.addEventListener("pointerup", () => {
+    painting = false;
+  });
 
-      refreshHeroList();
-    }
-  );
+  canvas.addEventListener("pointercancel", () => {
+    painting = false;
+  });
 
-  $("chatInput").addEventListener(
-    "keydown",
-    event => {
-      if (
-        event.key === "Enter" &&
-        !event.shiftKey &&
-        !event.isComposing
-      ) {
-        event.preventDefault();
-        sendStory();
-      }
-    }
-  );
+  $("selectedHero").onchange = event =>
+    selectHero(event.target.value);
 
-  addClick("transformButton", async () => {
+  $("deleteHero").onclick = deleteHero;
+  $("inspectHero").onclick = inspectHero;
+
+  $("editHero").onclick = () => {
     const hero = selectedHero();
+    if (hero) openEditor(hero.original, hero.id);
+  };
 
-    const description =
-      $("transformInput").value.trim();
+  $("sendButton").onclick = () =>
+    sendStory($("chatInput").value);
 
-    const button =
-      $("transformButton");
+  $("micButton").onclick = toggleMicrophone;
 
-    button.disabled = true;
+  $("voiceButton").onclick = () => {
+    state.voiceEnabled = !state.voiceEnabled;
+    $("voiceButton").textContent =
+      state.voiceEnabled
+        ? "🔊 自然語音：開"
+        : "🔇 自然語音：關";
+    if (!state.voiceEnabled) stopVoice();
+  };
 
-    try {
+  $("stopVoice").onclick = stopVoice;
+
+  $("transformButton").onclick = async () => {
+    const hero = selectedHero();
+    if (hero) {
       await transformHero(
         hero,
-        description
+        $("transformInput").value.trim()
       );
-    } finally {
-      button.disabled = false;
     }
-  });
+  };
 
-  addClick(
-    "restoreButton",
-    showOriginalHero
-  );
+  $("restoreButton").onclick = restoreHero;
+  $("showTransform").onclick = toggleHeroTransform;
 
-  addClick(
-    "showTransform",
-    showTransformedHero
-  );
-
-  addClick("skillButton", () => {
+  $("skillButton").onclick = () => {
     const hero = selectedHero();
+    if (!hero) return;
+    const skill = hero.skills.at(-1);
+    performAction({
+      heroId: hero.id,
+      type: skill?.type === "laser" ? "laser" : "sparkle",
+      duration: 4500
+    });
+  };
 
-    if (!hero?.skills.length) {
-      setStatus(
-        "請先讓主角學會技能"
-      );
-      return;
-    }
+  $("worldSelect").onchange = event => {
+    state.world = event.target.value;
+  };
 
-    hero.skillUntil =
-      performance.now() + 4000;
-
-    setSpeech(
-      "⚡ " + hero.name +
-      " 表演：" +
-      hero.skills.at(-1).name
-    );
-  });
-
-  $("worldSelect").addEventListener(
-    "change",
-    event => {
-      state.world =
-        event.target.value;
-
-      const themes = {
-        ocean: [
-          "🌊 Mindspace｜海底世界",
-          "linear-gradient(#66c5eb,#aee9f5 75%,#73c8cb)"
-        ],
-        forest: [
-          "🌳 Mindspace｜森林世界",
-          "linear-gradient(#c2e9fa,#d4edba 75%,#90c988)"
-        ],
-        space: [
-          "🚀 Mindspace｜太空世界",
-          "linear-gradient(#101733,#323c78)"
-        ]
-      };
-
-      $("worldTitle").textContent =
-        themes[state.world][0];
-
-      $("world").style.background =
-        themes[state.world][1];
-    }
-  );
-
-  addClick("resetButton", () => {
-    if (!confirm(
-      "確定要清除所有主角與故事嗎？"
-    )) {
-      return;
-    }
-
-    for (const hero of state.heroes) {
-      hero.element.remove();
-    }
-
+  $("resetButton").onclick = () => {
+    if (!confirm("確定要重新開始冒險嗎？")) return;
+    stopVoice();
+    state.heroes.forEach(h => h.element.remove());
     state.heroes = [];
     state.selectedId = null;
-    state.history = [];
     state.scenes = [];
-
-    $("chatLog").replaceChildren();
-    $("appearance").textContent = "";
-
-    refreshHeroList();
-
-    setSpeech(
-      "🌱 一起創造新的黏土朋友吧！"
-    );
-
-    setStatus("已開始新創作");
-  });
-
-  addClick("mobileToggle", () => {
-    $("sidebar").classList.toggle(
-      "collapsed"
-    );
-
-    setTimeout(() => {
-      window.dispatchEvent(
-        new Event("resize")
-      );
-    }, 250);
-  });
+    state.history = [];
+    $("chatLog").innerHTML = "";
+    renderHeroList();
+    setStatus("新的冒險開始了！");
+  };
 }
 
-/* ==========================================
-   初始化
-   ========================================== */
-
-function initializeMindspace() {
-  setupButtons();
-  refreshHeroList();
-  startP5World();
+document.addEventListener("DOMContentLoaded", () => {
+  bindEvents();
   initializeBridge();
-
-  if (!GAS_URL.startsWith("https://")) {
-    setStatus(
-      "🌈 網頁已啟動，AI 後端尚未設定"
-    );
-  }
-}
-
-if (document.readyState === "loading") {
-  document.addEventListener(
-    "DOMContentLoaded",
-    initializeMindspace,
-    { once: true }
-  );
-} else {
-  initializeMindspace();
-}
+  renderHeroList();
+});
