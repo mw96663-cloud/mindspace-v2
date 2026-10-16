@@ -4,7 +4,7 @@
    GitHub Pages + p5.js + Google Apps Script
    =================================================== */
 
-const GAS_URL = "請貼上你原本的GAS網頁應用程式網址";
+const GAS_URL = "https://script.google.com/macros/s/AKfycbwUooMD69_NMBhTzxf0Os_D6BEGb3QsGyhXpTGv09emRcG_4du219K4qO_FggY1vnLHOg/exec";
 
 const $ = id => document.getElementById(id);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
