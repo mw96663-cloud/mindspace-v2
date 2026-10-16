@@ -1,0 +1,690 @@
+
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+
+  <title>Mindspace｜心智小宇宙</title>
+
+  <!-- p5.js -->
+  <script src="https://cdn.jsdelivr.net/npm/p5@1.11.10/lib/p5.min.js"></script>
+
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Microsoft JhengHei", Arial, sans-serif;
+      background: #d8f2fa;
+      color: #504b69;
+    }
+
+    button, input, textarea, select {
+      font: inherit;
+    }
+
+    button {
+      border: none;
+      border-radius: 14px;
+      padding: 12px;
+      background: #eadcff;
+      color: #514b69;
+      font-weight: bold;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .app {
+      display: flex;
+      width: 100%;
+      height: 100dvh;
+      overflow: hidden;
+    }
+
+    .world {
+      position: relative;
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      background: linear-gradient(
+        #66c5eb,
+        #aee9f5 75%,
+        #73c8cb
+      );
+    }
+
+    #scene {
+      position: absolute;
+      inset: 0;
+    }
+
+    #actors {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+    }
+
+    #worldTitle {
+      position: absolute;
+      z-index: 5;
+      top: 18px;
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 12px 20px;
+      background: rgba(255,255,255,0.85);
+      border-radius: 24px;
+      font-weight: bold;
+      white-space: nowrap;
+    }
+
+    #speechBubble {
+      position: absolute;
+      z-index: 6;
+      bottom: 25px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: max-content;
+      max-width: 85%;
+      padding: 15px 20px;
+      background: rgba(255,255,255,0.94);
+      border-radius: 20px;
+      box-shadow: 0 5px 18px #43849a33;
+      text-align: center;
+      line-height: 1.6;
+    }
+
+    .sidebar {
+      width: 350px;
+      flex-shrink: 0;
+      padding: 14px;
+      background: #fffaff;
+      overflow-y: auto;
+    }
+
+    .brand {
+      text-align: center;
+      padding: 18px;
+      margin-bottom: 14px;
+      border-radius: 20px;
+      background: linear-gradient(
+        120deg,
+        #ffe1ef,
+        #def3ff
+      );
+    }
+
+    .brand h1 {
+      margin: 5px;
+      font-size: 27px;
+    }
+
+    .brand p {
+      margin: 5px;
+      font-size: 13px;
+    }
+
+    .section {
+      padding: 14px;
+      margin-bottom: 13px;
+      border: 2px solid #f1e8f5;
+      border-radius: 18px;
+      background: white;
+    }
+
+    .section h2 {
+      margin: 0 0 12px;
+      font-size: 17px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .full {
+      width: 100%;
+      margin-top: 8px;
+    }
+
+    textarea, select, input[type="text"] {
+      width: 100%;
+      padding: 11px;
+      border: 2px solid #eee5f3;
+      border-radius: 12px;
+      background: white;
+      color: #514b69;
+    }
+
+    textarea {
+      min-height: 85px;
+      resize: vertical;
+    }
+
+    .pink { background: #ffe0ec; }
+    .blue { background: #dcefff; }
+    .mint { background: #dff7e7; }
+    .yellow { background: #fff0c8; }
+
+    .hint {
+      font-size: 12px;
+      color: #8c859b;
+      line-height: 1.7;
+    }
+
+    #heroList {
+      margin-bottom: 10px;
+    }
+
+    #chatLog {
+      height: 160px;
+      padding: 10px;
+      overflow-y: auto;
+      background: #f8f3ff;
+      border-radius: 12px;
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    #status {
+      padding: 12px;
+      background: #f4efff;
+      border-radius: 12px;
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+
+    .modal {
+      position: fixed;
+      z-index: 50;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 12px;
+      background: rgba(34,47,75,0.65);
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    .dialog {
+      width: min(760px, 98vw);
+      max-height: 95dvh;
+      overflow-y: auto;
+      padding: 18px;
+      background: #fffaff;
+      border-radius: 22px;
+    }
+
+    #cameraVideo {
+      display: block;
+      width: 100%;
+      max-height: 55dvh;
+      background: #e7eef4;
+      border-radius: 14px;
+    }
+
+    #editCanvas {
+      display: block;
+      width: 100%;
+      max-height: 55dvh;
+      background: #edf1f5;
+      border-radius: 14px;
+      touch-action: none;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    #startScreen {
+      position: fixed;
+      z-index: 100;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      background: linear-gradient(
+        140deg,
+        #a5e4f5,
+        #f8dcec
+      );
+    }
+
+    .startCard {
+      width: min(470px, 95vw);
+      padding: 35px;
+      text-align: center;
+      background: rgba(255,255,255,0.95);
+      border-radius: 30px;
+      box-shadow: 0 10px 35px #638da344;
+    }
+
+    .startCard h1 {
+      font-size: 34px;
+    }
+
+    #startButton {
+      padding: 17px 35px;
+      font-size: 20px;
+      background: #ffd0e4;
+    }
+
+    #bridgeFrame {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+      pointer-events: none;
+      border: 0;
+    }
+
+    #mobileToggle {
+      display: none;
+    }
+
+    @media (max-width: 850px) {
+      .app {
+        flex-direction: column;
+      }
+
+      .world {
+        min-height: 0;
+      }
+
+      .sidebar {
+        width: 100%;
+        flex: 0 0 min(45dvh, 380px);
+        border-top: 3px solid #e9ddf3;
+      }
+
+      .sidebar.collapsed {
+        flex-basis: 0;
+        padding: 0;
+        overflow: hidden;
+      }
+
+      #mobileToggle {
+        display: block;
+        position: fixed;
+        z-index: 20;
+        right: 15px;
+        bottom: 15px;
+        width: 50px;
+        height: 50px;
+        border-radius: 50%;
+        background: #ffe1ed;
+      }
+
+      .brand {
+        padding: 10px;
+      }
+
+      .brand h1 {
+        font-size: 21px;
+      }
+
+      .section {
+        padding: 10px;
+      }
+    }
+  </style>
+</head>
+
+<body>
+
+  <!-- 初始畫面 -->
+  <div id="startScreen">
+    <div class="startCard">
+      <div style="font-size:55px;">
+        🐠 🫧 🌈
+      </div>
+
+      <h1>Mindspace</h1>
+      <h2>心智小宇宙</h2>
+
+      <p>
+        讓你親手創造的黏土朋友，
+        進入一個會說話、會變身的想像世界！
+      </p>
+
+      <button id="startButton">
+        ✨ 開始冒險
+      </button>
+
+      <p class="hint">
+        支援 Windows 與 iPad，
+        可使用攝影機及麥克風。
+      </p>
+    </div>
+  </div>
+
+  <div class="app">
+
+    <!-- 世界 -->
+    <main class="world" id="world">
+
+      <div id="scene"></div>
+
+      <div id="actors"></div>
+
+      <div id="worldTitle">
+        🌊 Mindspace｜海底世界
+      </div>
+
+      <div id="speechBubble">
+        ✨ 先創造你的第一個黏土朋友吧！
+      </div>
+
+    </main>
+
+    <!-- 側邊控制區 -->
+    <aside class="sidebar" id="sidebar">
+
+      <header class="brand">
+        <div>🌈 🫧 🐠</div>
+
+        <h1>Mindspace</h1>
+
+        <p>心智小宇宙</p>
+
+        <p>給予方法，但不給予答案</p>
+      </header>
+
+      <!-- 黏土創作 -->
+      <section class="section">
+
+        <h2>📸 創造黏土主角</h2>
+
+        <div id="heroList">
+          🌱 還沒有黏土主角
+        </div>
+
+        <div class="grid">
+
+          <button id="openCamera" class="pink">
+            📷 開啟攝影機
+          </button>
+
+          <button id="uploadPhoto" class="yellow">
+            🖼️ 上傳照片
+          </button>
+
+          <button id="editHero" class="blue">
+            🪄 修改去背
+          </button>
+
+          <button id="deleteHero" class="mint">
+            🗑️ 移除主角
+          </button>
+
+        </div>
+
+        <button id="inspectHero" class="full blue">
+          🧠 AI 觀察黏土造型
+        </button>
+
+        <p id="appearance" class="hint"></p>
+
+      </section>
+
+      <!-- AI 對話 -->
+      <section class="section">
+
+        <h2>🎤 和黏土朋友說話</h2>
+
+        <select id="selectedHero"></select>
+
+        <div id="chatLog"></div>
+
+        <textarea
+          id="chatInput"
+          placeholder="例如：我想要你長出紫色翅膀，飛起來發射雷射！"
+        ></textarea>
+
+        <div class="grid">
+
+          <button id="micButton" class="pink">
+            🎙️ 開始說話
+          </button>
+
+          <button id="sendButton" class="blue">
+            💬 傳給 AI
+          </button>
+
+          <button id="voiceButton" class="mint">
+            🔊 語音：開
+          </button>
+
+          <button id="stopVoice" class="yellow">
+            ⏹️ 停止聲音
+          </button>
+
+        </div>
+
+      </section>
+
+      <!-- AI 造型 -->
+      <section class="section">
+
+        <h2>🎨 AI 黏土造型與技能</h2>
+
+        <textarea
+          id="transformInput"
+          placeholder="例如：增加一對紫色黏土翅膀，保留原本身體形狀"
+        ></textarea>
+
+        <div class="grid">
+
+          <button id="transformButton" class="pink">
+            ✨ AI 黏土變身
+          </button>
+
+          <button id="restoreButton" class="blue">
+            ↩️ 原始造型
+          </button>
+
+          <button id="showTransform" class="mint">
+            👀 AI 造型
+          </button>
+
+          <button id="skillButton" class="yellow">
+            ⚡ 表演技能
+          </button>
+
+        </div>
+
+        <p class="hint">
+          AI 可以增加黏土風格造型，
+          原始黏土圖片會另外保留。
+        </p>
+
+      </section>
+
+      <!-- 世界設定 -->
+      <section class="section">
+
+        <h2>🌍 探索世界</h2>
+
+        <select id="worldSelect">
+
+          <option value="ocean">
+            🌊 海底世界
+          </option>
+
+          <option value="forest">
+            🌳 森林世界
+          </option>
+
+          <option value="space">
+            🚀 太空世界
+          </option>
+
+        </select>
+
+        <button id="resetButton" class="full yellow">
+          🌱 開始新創作
+        </button>
+
+      </section>
+
+      <!-- 系統狀態 -->
+      <section class="section">
+
+        <h2>🔌 系統狀態</h2>
+
+        <div id="status">
+          等待啟動……
+        </div>
+
+      </section>
+
+    </aside>
+
+  </div>
+
+  <!-- iPad 側邊欄 -->
+  <button id="mobileToggle">
+    ☰
+  </button>
+
+  <!-- GAS 後端橋樑 -->
+  <iframe
+    id="bridgeFrame"
+    title="Mindspace AI Bridge"
+  ></iframe>
+
+  <!-- 上傳圖片 -->
+  <input
+    type="file"
+    id="photoFile"
+    accept="image/*"
+    hidden
+  >
+
+  <!-- 攝影機視窗 -->
+  <div id="cameraModal" class="modal hidden">
+
+    <div class="dialog">
+
+      <h2>📸 拍攝黏土主角</h2>
+
+      <video
+        id="cameraVideo"
+        autoplay
+        muted
+        playsinline
+      ></video>
+
+      <p id="cameraMessage" class="hint">
+        準備攝影機……
+      </p>
+
+      <div class="actions">
+
+        <button id="captureButton" class="pink">
+          📸 拍照
+        </button>
+
+        <button id="switchCamera" class="blue">
+          🔄 切換鏡頭
+        </button>
+
+        <button id="retryCamera">
+          重試
+        </button>
+
+        <button id="closeCamera">
+          ✖ 關閉
+        </button>
+
+      </div>
+
+    </div>
+
+  </div>
+
+  <!-- 去背視窗 -->
+  <div id="editorModal" class="modal hidden">
+
+    <div class="dialog">
+
+      <h2>🪄 黏土去背編輯</h2>
+
+      <canvas id="editCanvas"></canvas>
+
+      <p class="hint">
+        可以自動去背，也能用手指或滑鼠擦除、
+        還原圖片。
+      </p>
+
+      <div class="actions">
+
+        <button id="removeBg" class="pink">
+          ✨ 自動去背
+        </button>
+
+        <button id="eraseMode">
+          🧽 擦除
+        </button>
+
+        <button id="restoreMode">
+          🖌️ 還原
+        </button>
+
+        <button id="undoEdit">
+          ↩️ 撤銷
+        </button>
+
+      </div>
+
+      <p class="hint">筆刷大小</p>
+
+      <input
+        type="range"
+        id="brushSize"
+        min="5"
+        max="90"
+        value="28"
+      >
+
+      <div class="actions">
+
+        <button id="saveEditor" class="mint">
+          🌈 放入世界
+        </button>
+
+        <button id="closeEditor">
+          取消
+        </button>
+
+      </div>
+
+    </div>
+
+  </div>
+
+  <!--
+    sketch.js：
+    角色動畫、攝影機、去背、
+    語音辨識、AI 對話與故事互動
+    會在下一步建立。
+  -->
+  <script src="./sketch.js"></script>
+
+</body>
+</html>
