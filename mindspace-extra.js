@@ -2,633 +2,1325 @@
 "use strict";
 
 /*
-  Mindspace V2 功能擴充
-  不修改 GAS_URL、initializeBridge、callAI 或 Bridge.html。
+  Mindspace V2 — Dynamic Skills & Auto Conversation
+  動態技能 + 角色命名 + 自動語音循環 + 教師背景
 
-  新增：
-  1. 教師自訂背景
-  2. 每個新角色主動邀請命名
-  3. AI 記住角色名字與技能
-  4. AI 說完後自動聆聽
-  5. 語音控制黏土變身
+  依賴原本 sketch.js：
+  state, callAI, heroNow, refreshHeroes,
+  chat, bubble, status, performAction,
+  addScene, transformHero, scaledData,
+  fileData, wav16k, blobBase64 等。
+
+  不修改原本 GAS Bridge 連線。
 */
 
 (function () {
-  const extra = {
+
+  const X = {
     autoTalk: false,
     listening: false,
-    recordingMode: "chat",
-    audioContext: null,
+    processing: false,
+    speechToken: 0,
+    micToken: 0,
+    recorder: null,
+    stream: null,
+    chunks: [],
+    context: null,
     analyser: null,
-    microphoneSource: null,
-    monitorTimer: null,
-    silenceSince: 0,
-    speechDetected: false,
-    recordingStartedAt: 0,
+    source: null,
+    monitor: null,
+    heardVoice: false,
+    silenceStart: 0,
+    startedAt: 0,
+    voiceAudio: null,
+    voiceUtterance: null,
     background: "",
     backgroundName: "",
-    conversationGeneration: 0
+    currentSkillIndex: {},
+    memoryKey: "mindspace_v2_character_memory"
   };
 
-  const original = {
-    setupButtons: setupButtons,
-    saveHero: saveHero,
-    welcomeHero: welcomeHero,
-    sendStory: sendStory,
-    speak: speak,
-    stopSpeech: stopSpeech,
-    toggleRecording: toggleRecording,
-    finishRecording: finishRecording
+  const get = id => document.getElementById(id);
+
+  const old = {
+    setupButtons,
+    saveHero,
+    removeHero,
+    refreshHeroes,
+    animateHeroes,
+    drawEnvironment,
+    stopSpeech
   };
 
-  const el = id => document.getElementById(id);
+  const wait = ms =>
+    new Promise(resolve => setTimeout(resolve, ms));
 
-  function showStatus(message) {
+  function sayStatus(message) {
     status(message);
   }
 
-  function setAutoButton() {
-    const button = el("autoTalkButton");
-    if (button) {
-      button.textContent = extra.autoTalk
-        ? "🛑 結束自動語音對話"
-        : "🎤 開始自動語音對話";
-      button.className = extra.autoTalk
-        ? "full yellow"
-        : "full pink";
-    }
+  function safeArray(value) {
+    return Array.isArray(value) ? value : [];
   }
 
-  function stopMonitor() {
-    if (extra.monitorTimer) {
-      clearInterval(extra.monitorTimer);
-      extra.monitorTimer = null;
-    }
-
-    try {
-      extra.microphoneSource?.disconnect();
-    } catch (_) {}
-
-    extra.microphoneSource = null;
-    extra.analyser = null;
-
-    if (extra.audioContext) {
-      extra.audioContext.close().catch(() => {});
-      extra.audioContext = null;
-    }
-
-    extra.listening = false;
+  function selectedHero() {
+    return heroNow();
   }
 
-  function stopAutoConversation() {
-    extra.autoTalk = false;
-    extra.conversationGeneration++;
-    stopMonitor();
-
-    if (state.recorder?.state === "recording") {
-      state.recorder.stop();
-    }
-
-    setAutoButton();
-    showStatus("⏹️ 已結束自動語音對話");
+  function heroById(id) {
+    return state.heroes.find(h => h.id === id) || null;
   }
 
-  function waitForAudioEnd(audio, generation) {
-    return new Promise(resolve => {
-      if (!audio || audio.ended) {
-        resolve();
-        return;
-      }
+  function skillKind(value) {
+    const kinds = new Set([
+      "spin", "dance", "fly", "jump", "bounce",
+      "shake", "hide", "swim", "stop",
+      "follow", "meet", "circle",
+      "laser", "lightning", "rainbow",
+      "glow", "sparkle", "teleport"
+    ]);
 
-      let completed = false;
-
-      function finish() {
-        if (completed) return;
-        completed = true;
-        audio.removeEventListener("ended", finish);
-        audio.removeEventListener("error", finish);
-        resolve();
-      }
-
-      audio.addEventListener("ended", finish);
-      audio.addEventListener("error", finish);
-
-      // 防止音訊事件異常導致永遠無法繼續。
-      const started = Date.now();
-
-      const timer = setInterval(() => {
-        if (
-          completed ||
-          generation !== extra.conversationGeneration ||
-          audio.paused ||
-          audio.ended ||
-          Date.now() - started > 45000
-        ) {
-          clearInterval(timer);
-          finish();
-        }
-      }, 300);
-    });
+    return kinds.has(value) ? value : "sparkle";
   }
 
-  async function waitForBrowserSpeech(generation) {
-    if (!("speechSynthesis" in window)) return;
-
-    const started = Date.now();
-
-    while (
-      generation === extra.conversationGeneration &&
-      Date.now() - started < 45000
-    ) {
-      if (!speechSynthesis.speaking &&
-          !speechSynthesis.pending) {
-        return;
-      }
-
-      await new Promise(resolve => setTimeout(resolve, 200));
-    }
+  function skillColor(value) {
+    return /^#[0-9a-fA-F]{6}$/.test(String(value))
+      ? value
+      : "#ff66cc";
   }
 
-  async function resumeListening(generation) {
-    if (
-      !extra.autoTalk ||
-      generation !== extra.conversationGeneration ||
-      extra.listening ||
-      state.recording ||
-      state.busy
-    ) {
-      return;
-    }
-
-    try {
-      await toggleRecording();
-    } catch (error) {
-      showStatus("❌ 自動聆聽失敗：" + error.message);
-      stopAutoConversation();
-    }
-  }
-
-  /*
-    讓 AI 說完話才開麥克風。
-    保留原本的 OpenAI TTS 與瀏覽器語音備援。
-  */
-  speak = async function (text) {
-    const generation = extra.conversationGeneration;
-
-    await original.speak(text);
-
-    if (!extra.autoTalk) return;
-
-    if (state.audio) {
-      await waitForAudioEnd(state.audio, generation);
-    } else {
-      await waitForBrowserSpeech(generation);
-    }
-
-    if (
-      extra.autoTalk &&
-      generation === extra.conversationGeneration
-    ) {
-      await new Promise(resolve => setTimeout(resolve, 400));
-      await resumeListening(generation);
-    }
-  };
-
-  /*
-    每一隻新角色都會主動問名字。
-    角色真正的名字由孩子決定。
-  */
-  welcomeHero = function (hero) {
-    const text =
-      "哇！我誕生了！請幫我取個名字吧！" +
-      "我會很多神奇的技能！" +
-      "你想讓我表演什麼技能呢？";
-
-    state.selectedId = hero.id;
-    refreshHeroes();
-
-    chat("🌈 新朋友", text, true);
-    bubble("🌈 新朋友：" + text);
-    speak(text);
-  };
-
-  saveHero = function () {
-    const previousIds = new Set(
-      state.heroes.map(hero => hero.id)
+  function skillDuration(value) {
+    return Math.max(
+      1,
+      Math.min(20, Number(value) || 6)
     );
+  }
 
-    original.saveHero();
+  function normalizeSkill(skill) {
+    return {
+      name: String(skill.name || "神奇技能")
+        .trim()
+        .slice(0, 50),
+      type: skillKind(skill.type),
+      color: skillColor(skill.color),
+      duration: skillDuration(skill.duration),
+      description: String(skill.description || "")
+        .slice(0, 150)
+    };
+  }
 
-    const hero = heroNow();
+  /*
+    角色記憶
 
-    if (!hero || previousIds.has(hero.id)) return;
+    每個角色都擁有自己的名字、技能。
+    儲存角色資訊，不把大型圖片強行塞進 localStorage。
+  */
 
-    // 原本第一隻角色已由 saveHero 呼叫 welcomeHero。
-    // 這裡補上第二隻以後的新角色。
-    if (previousIds.size > 0) {
-      welcomeHero(hero);
+  function rememberCharacters() {
+    const characters = state.heroes.map(h => ({
+      id: h.id,
+      name: h.name,
+      appearance: h.appearance || "",
+      personality: h.personality || "",
+      skills: safeArray(h.skills).map(normalizeSkill)
+    }));
+
+    try {
+      localStorage.setItem(
+        X.memoryKey,
+        JSON.stringify(characters)
+      );
+    } catch (error) {
+      console.warn("角色記憶儲存失敗", error);
     }
-  };
+  }
 
-  function updateHeroName(hero, newName) {
-    if (!hero || !newName) return;
+  function renameHero(hero, name) {
+    if (!hero) return;
 
-    const name = String(newName).trim().slice(0, 30);
+    const newName = String(name || "").trim().slice(0, 30);
 
-    if (!name) return;
+    if (!newName) return;
 
-    hero.name = name;
+    hero.name = newName;
 
     if (hero.nameElement) {
-      hero.nameElement.textContent = name;
+      hero.nameElement.textContent = newName;
     }
 
-    refreshHeroes();
+    old.refreshHeroes();
+    rememberCharacters();
   }
 
-  function rememberSkill(hero, skill) {
-    if (!hero || !skill?.name) return;
+  function learnSkill(hero, input) {
+    if (!hero || !input) return null;
 
-    const name = String(skill.name).trim().slice(0, 40);
-    if (!name) return;
-
-    const type = String(skill.type || "glow");
-    const color = /^#[0-9a-fA-F]{6}$/.test(
-      String(skill.color || "")
-    ) ? skill.color : "#ff66cc";
+    const skill = normalizeSkill(input);
 
     if (!Array.isArray(hero.skills)) {
       hero.skills = [];
     }
 
     const existing = hero.skills.find(
-      item => item.name === name
+      item => item.name === skill.name
     );
 
     if (existing) {
-      existing.type = type;
-      existing.color = color;
+      Object.assign(existing, skill);
     } else {
-      hero.skills.push({ name, type, color });
+      hero.skills.push(skill);
     }
 
-    hero.skillUntil = performance.now() + 5000;
+    rememberCharacters();
+    return skill;
   }
 
-  async function understandChildMessage(message) {
-    const heroes = state.heroes.map(hero => ({
-      id: hero.id,
-      name: hero.name,
-      appearance: hero.appearance || "",
-      skills: (hero.skills || []).map(skill => skill.name)
-    }));
+  /*
+    動態技能
 
-    const result = await callAI("understandChild", {
-      message,
-      selectedHeroId: state.selectedId,
-      heroes
+    所有技能都作用在現有黏土角色上。
+    不產生新的角色圖片。
+  */
+
+  function playSkill(hero, input) {
+    if (!hero || !input) return;
+
+    const skill = normalizeSkill(input);
+    const now = performance.now();
+    const until = now + skill.duration * 1000;
+
+    hero.extraActions = hero.extraActions || [];
+
+    hero.extraActions.push({
+      ...skill,
+      started: now,
+      until
     });
 
-    if (!result) return;
+    // 限制同時播放的效果數量。
+    hero.extraActions = hero.extraActions.slice(-8);
 
-    for (const rename of result.renames || []) {
-      const hero = state.heroes.find(
-        item => item.id === rename.heroId
-      );
+    const movementTypes = new Set([
+      "spin", "dance", "fly", "jump",
+      "bounce", "shake", "hide",
+      "swim", "stop", "follow",
+      "meet", "circle"
+    ]);
 
-      if (hero) {
-        updateHeroName(hero, rename.name);
-      }
+    if (movementTypes.has(skill.type)) {
+      performAction({
+        heroId: hero.id,
+        type: skill.type,
+        duration: skill.duration
+      });
     }
 
-    for (const item of result.skills || []) {
-      const hero = state.heroes.find(
-        candidate => candidate.id === item.heroId
+    if (skill.type === "teleport") {
+      hero.x = Math.max(
+        0.12,
+        Math.min(0.88, Math.random())
       );
 
-      if (hero) {
-        rememberSkill(hero, item);
+      hero.y = Math.max(
+        0.16,
+        Math.min(0.8, Math.random())
+      );
+    }
+
+    if ([
+      "laser", "lightning", "rainbow",
+      "glow", "sparkle"
+    ].includes(skill.type)) {
+      hero.skillUntil = until;
+    }
+
+    bubble(
+      "⚡ " + hero.name + "正在表演：" + skill.name
+    );
+  }
+
+  function playRememberedSkill(hero) {
+    if (!hero) {
+      sayStatus("請先選擇黏土主角");
+      return;
+    }
+
+    if (!hero.skills?.length) {
+      sayStatus(
+        "這位朋友還沒有技能，試著告訴它能做什麼！"
+      );
+      return;
+    }
+
+    const index = X.currentSkillIndex[hero.id] || 0;
+    const skill = hero.skills[index % hero.skills.length];
+
+    X.currentSkillIndex[hero.id] =
+      (index + 1) % hero.skills.length;
+
+    playSkill(hero, skill);
+
+    sayStatus(
+      "⚡ " + hero.name + "表演：" + skill.name
+    );
+  }
+
+  /*
+    在原本 p5 動畫之後，
+    疊加多技能動畫及特效。
+  */
+
+  function drawExtraEffect(p, hero, effect, now) {
+    const x = hero.x * p.width;
+    const y = hero.y * p.height;
+    const t = now / 1000;
+
+    p.push();
+
+    if (effect.type === "laser") {
+      p.stroke(255);
+      p.strokeWeight(10);
+      p.line(
+        x, y - 20,
+        x + hero.face * 260,
+        y - 20
+      );
+
+      p.stroke(effect.color);
+      p.strokeWeight(5);
+      p.line(
+        x, y - 20,
+        x + hero.face * 260,
+        y - 20
+      );
+    }
+
+    if (effect.type === "lightning") {
+      p.noFill();
+      p.stroke(effect.color);
+      p.strokeWeight(5);
+
+      p.beginShape();
+
+      for (let i = 0; i <= 8; i++) {
+        const xx = x + hero.face * i * 30;
+        const yy = y - 20 + (i % 2 ? 20 : -20);
+
+        p.vertex(xx, yy);
       }
+
+      p.endShape();
+    }
+
+    if (effect.type === "rainbow") {
+      const colors = [
+        "#ff7899", "#ffb86b", "#ffe67c",
+        "#8cde9e", "#7fcaff", "#bc9cff"
+      ];
+
+      p.noFill();
+      p.strokeWeight(5);
+
+      colors.forEach((color, i) => {
+        p.stroke(color);
+        p.arc(
+          x, y,
+          130 + i * 12,
+          130 + i * 12,
+          Math.PI,
+          Math.PI * 2
+        );
+      });
+    }
+
+    if (effect.type === "glow") {
+      p.noFill();
+      p.stroke(effect.color);
+      p.strokeWeight(6);
+
+      p.circle(
+        x, y,
+        150 + Math.sin(t * 7) * 22
+      );
     }
 
     if (
-      result.renames?.length ||
-      result.skills?.length
+      effect.type === "sparkle" ||
+      effect.type === "teleport"
     ) {
-      refreshHeroes();
+      p.noStroke();
+      p.fill(effect.color);
+
+      for (let i = 0; i < 12; i++) {
+        const angle = t * 3 + i * Math.PI / 6;
+
+        const radius =
+          60 + Math.sin(t * 5 + i) * 20;
+
+        p.circle(
+          x + Math.cos(angle) * radius,
+          y + Math.sin(angle) * radius,
+          7 + i % 4
+        );
+      }
+    }
+
+    p.pop();
+  }
+
+  animateHeroes = function (p, t) {
+    old.animateHeroes(p, t);
+
+    const now = performance.now();
+
+    for (const hero of state.heroes) {
+      hero.extraActions = safeArray(
+        hero.extraActions
+      ).filter(effect => effect.until > now);
+
+      const active = hero.extraActions;
+
+      const has = type =>
+        active.some(effect => effect.type === type);
+
+      if (has("hide")) {
+        hero.element.style.opacity = "0.12";
+      }
+
+      if (has("spin") && hero.action?.type !== "spin") {
+        hero.element.style.transform +=
+          ` rotate(${(t * 220) % 360}deg)`;
+      }
+
+      if (has("dance") && hero.action?.type !== "dance") {
+        hero.element.style.transform +=
+          ` rotate(${Math.sin(t * 7) * 22}deg)`;
+      }
+
+      if (has("fly") && hero.action?.type !== "fly") {
+        hero.element.style.top =
+          (hero.y * 100 -
+           Math.sin(t * 3) * 5) + "%";
+      }
+
+      if (has("bounce") && hero.action?.type !== "bounce") {
+        hero.element.style.transform +=
+          ` translateY(${-Math.abs(Math.sin(t * 6)) * 35}px)`;
+      }
+
+      for (const effect of active) {
+        drawExtraEffect(p, hero, effect, now);
+      }
+    }
+  };
+
+  /*
+    AI 語音
+
+    必須等聲音真正播放完畢，
+    才可以重新開啟麥克風。
+  */
+
+  function cancelSpeech() {
+    X.speechToken++;
+
+    if (X.voiceAudio) {
+      X.voiceAudio.pause();
+      X.voiceAudio.src = "";
+      X.voiceAudio = null;
+    }
+
+    if ("speechSynthesis" in window) {
+      speechSynthesis.cancel();
+    }
+
+    old.stopSpeech();
+  }
+
+  function browserSpeak(text, token) {
+    return new Promise(resolve => {
+      if (
+        !state.voiceEnabled ||
+        !("speechSynthesis" in window)
+      ) {
+        resolve();
+        return;
+      }
+
+      const utterance =
+        new SpeechSynthesisUtterance(text);
+
+      utterance.lang = "zh-TW";
+      utterance.rate = 0.95;
+      utterance.pitch = 1.08;
+
+      const voices = speechSynthesis.getVoices();
+
+      utterance.voice =
+        voices.find(v => v.lang === "zh-TW") ||
+        voices.find(v => v.lang.startsWith("zh")) ||
+        null;
+
+      X.voiceUtterance = utterance;
+
+      let finished = false;
+
+      const done = () => {
+        if (finished) return;
+        finished = true;
+        resolve();
+      };
+
+      utterance.onend = done;
+      utterance.onerror = done;
+
+      try {
+        speechSynthesis.speak(utterance);
+      } catch (_) {
+        done();
+      }
+
+      // 防止少數瀏覽器不觸發 onend。
+      const timer = setInterval(() => {
+        if (
+          finished ||
+          token !== X.speechToken ||
+          !speechSynthesis.speaking &&
+          !speechSynthesis.pending
+        ) {
+          clearInterval(timer);
+          done();
+        }
+      }, 250);
+    });
+  }
+
+  async function speakAndWait(text) {
+    if (!text) return;
+
+    cancelSpeech();
+
+    const token = X.speechToken;
+
+    if (!state.voiceEnabled) {
+      return;
+    }
+
+    try {
+      if (!state.bridgeReady) {
+        await browserSpeak(text, token);
+        return;
+      }
+
+      const response = await callAI(
+        "speakNatural",
+        { text: text.slice(0, 550) }
+      );
+
+      if (token !== X.speechToken) return;
+
+      if (!response.audio) {
+        throw Error("AI 沒有回傳語音");
+      }
+
+      const audio = new Audio(
+        "data:audio/mpeg;base64," + response.audio
+      );
+
+      X.voiceAudio = audio;
+
+      await new Promise((resolve, reject) => {
+        audio.onended = resolve;
+        audio.onerror = () =>
+          reject(Error("音訊播放失敗"));
+
+        audio.play().catch(reject);
+      });
+
+    } catch (error) {
+      if (token === X.speechToken) {
+        console.warn(
+          "自然語音失敗，改用瀏覽器語音：",
+          error
+        );
+
+        await browserSpeak(text, token);
+      }
     }
   }
 
   /*
-    一般故事對話之前，先更新角色的名字與技能。
-    即使 AI 故事後續失敗，已理解的角色資料仍保留。
-  */
-  sendStory = async function () {
-    const message = el("chatInput").value.trim();
+    麥克風自動錄音
 
-    if (!message || state.busy) return;
+    使用 MediaRecorder + 音量偵測：
+    - 偵測孩子開始說話
+    - 靜音約 1.5 秒後送出
+    - 最長約 16 秒
+    - 沒有人說話時停止，不送空白錄音
+  */
+
+  function releaseMicrophone() {
+    if (X.monitor) {
+      clearInterval(X.monitor);
+      X.monitor = null;
+    }
 
     try {
-      await understandChildMessage(message);
-    } catch (error) {
-      console.warn(
-        "[Mindspace Extra] 角色記憶解析失敗：",
-        error
+      X.source?.disconnect();
+    } catch (_) {}
+
+    X.source = null;
+    X.analyser = null;
+
+    if (X.context) {
+      X.context.close().catch(() => {});
+      X.context = null;
+    }
+
+    if (X.stream) {
+      X.stream.getTracks().forEach(
+        track => track.stop()
       );
-      // 不讓角色記憶功能故障影響原本故事。
+      X.stream = null;
     }
 
-    await original.sendStory();
+    X.listening = false;
+    state.recording = false;
 
-    // 原本 story 可能另外新增相同技能，
-    // 這裡合併重複項目，保留技能累積。
-    for (const hero of state.heroes) {
-      const unique = new Map();
+    const mic = get("micButton");
 
-      for (const skill of hero.skills || []) {
-        if (skill?.name) {
-          unique.set(skill.name, skill);
+    if (mic) {
+      mic.textContent = "🎙️ 開始說話";
+    }
+  }
+
+  function stopRecording() {
+    if (X.recorder?.state === "recording") {
+      X.recorder.stop();
+    }
+  }
+
+  function recordMimeType() {
+    const formats = [
+      "audio/mp4",
+      "audio/webm;codecs=opus",
+      "audio/webm"
+    ];
+
+    return formats.find(
+      type => MediaRecorder.isTypeSupported(type)
+    ) || "";
+  }
+
+  async function beginRecording(auto = false) {
+    if (X.listening || X.processing) return;
+
+    if (!state.bridgeReady) {
+      throw Error("請先等待 AI 連線成功");
+    }
+
+    if (
+      !navigator.mediaDevices?.getUserMedia ||
+      !window.MediaRecorder
+    ) {
+      throw Error(
+        "此瀏覽器不支援錄音，請使用新版 Chrome、Edge 或 Safari"
+      );
+    }
+
+    // 防止角色自己的聲音被錄進去。
+    cancelSpeech();
+
+    const micToken = ++X.micToken;
+
+    const stream =
+      await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
         }
-      }
+      });
 
-      hero.skills = [...unique.values()];
+    if (
+      micToken !== X.micToken ||
+      auto && !X.autoTalk
+    ) {
+      stream.getTracks().forEach(
+        track => track.stop()
+      );
+      return;
     }
-  };
 
-  function startSilenceDetection(stream) {
-    stopMonitor();
+    const mimeType = recordMimeType();
 
-    const AudioContextClass =
-      window.AudioContext || window.webkitAudioContext;
+    const recorder = new MediaRecorder(
+      stream,
+      mimeType ? { mimeType } : {}
+    );
 
-    if (!AudioContextClass) return;
+    X.stream = stream;
+    X.recorder = recorder;
+    X.chunks = [];
+    X.listening = true;
+    X.heardVoice = false;
+    X.silenceStart = 0;
+    X.startedAt = Date.now();
 
-    const context = new AudioContextClass();
-    const source = context.createMediaStreamSource(stream);
-    const analyser = context.createAnalyser();
+    state.recording = true;
 
-    analyser.fftSize = 2048;
-    source.connect(analyser);
+    recorder.ondataavailable = event => {
+      if (event.data.size) {
+        X.chunks.push(event.data);
+      }
+    };
 
-    extra.audioContext = context;
-    extra.microphoneSource = source;
-    extra.analyser = analyser;
-    extra.listening = true;
-    extra.speechDetected = false;
-    extra.silenceSince = 0;
-    extra.recordingStartedAt = Date.now();
+    recorder.onstop = () => {
+      const chunks = [...X.chunks];
+      const recordedType =
+        recorder.mimeType || "audio/webm";
 
-    const samples = new Uint8Array(analyser.fftSize);
+      const heardVoice = X.heardVoice;
+      const duration = Date.now() - X.startedAt;
 
-    extra.monitorTimer = setInterval(() => {
-      if (!state.recording) {
-        stopMonitor();
+      releaseMicrophone();
+
+      if (auto && !X.autoTalk) return;
+
+      if (auto && !heardVoice) {
+        sayStatus(
+          "🎤 沒有聽到說話，自動聆聽已暫停"
+        );
+        stopAutoTalk(false);
         return;
       }
 
-      analyser.getByteTimeDomainData(samples);
+      if (duration < 350) {
+        sayStatus("錄音時間太短");
+        return;
+      }
+
+      processRecording(
+        new Blob(chunks, { type: recordedType }),
+        auto
+      );
+    };
+
+    recorder.start();
+
+    get("micButton").textContent =
+      "⏹️ 結束說話";
+
+    sayStatus(
+      auto
+        ? "🎤 正在自動聆聽孩子說話……"
+        : "🎤 正在錄音，說完請按結束"
+    );
+
+    if (auto) {
+      startVoiceDetection(stream);
+    }
+  }
+
+  function startVoiceDetection(stream) {
+    const AudioContextClass =
+      window.AudioContext ||
+      window.webkitAudioContext;
+
+    if (!AudioContextClass) {
+      // 無法偵測音量時，至少限制錄音時間。
+      X.monitor = setInterval(() => {
+        if (Date.now() - X.startedAt > 12000) {
+          stopRecording();
+        }
+      }, 200);
+      return;
+    }
+
+    X.context = new AudioContextClass();
+    X.source =
+      X.context.createMediaStreamSource(stream);
+
+    X.analyser = X.context.createAnalyser();
+    X.analyser.fftSize = 2048;
+
+    X.source.connect(X.analyser);
+
+    const samples = new Uint8Array(
+      X.analyser.fftSize
+    );
+
+    X.monitor = setInterval(() => {
+      if (!X.listening || !X.analyser) return;
+
+      X.analyser.getByteTimeDomainData(samples);
 
       let sum = 0;
 
-      for (let i = 0; i < samples.length; i++) {
-        const amplitude = (samples[i] - 128) / 128;
-        sum += amplitude * amplitude;
+      for (const sample of samples) {
+        const value = (sample - 128) / 128;
+        sum += value * value;
       }
 
-      const rms = Math.sqrt(sum / samples.length);
+      const volume = Math.sqrt(
+        sum / samples.length
+      );
+
       const now = Date.now();
-      const elapsed = now - extra.recordingStartedAt;
+      const elapsed = now - X.startedAt;
 
-      // 可依教室環境調整。
-      const voiceDetected = rms > 0.025;
+      // 音量門檻可依實際教室環境調整。
+      const isSpeaking = volume > 0.025;
 
-      if (voiceDetected) {
-        extra.speechDetected = true;
-        extra.silenceSince = 0;
-      } else if (extra.speechDetected) {
-        if (!extra.silenceSince) {
-          extra.silenceSince = now;
+      if (isSpeaking) {
+        X.heardVoice = true;
+        X.silenceStart = 0;
+      } else if (X.heardVoice) {
+        if (!X.silenceStart) {
+          X.silenceStart = now;
         }
       }
 
-      const finishedSentence =
-        extra.speechDetected &&
-        extra.silenceSince &&
-        now - extra.silenceSince > 1600;
+      const finished =
+        X.heardVoice &&
+        X.silenceStart &&
+        now - X.silenceStart > 1500;
 
-      const timedOut = elapsed > 12000;
+      const maxDuration = elapsed > 16000;
+      const noSpeech = !X.heardVoice &&
+        elapsed > 10000;
 
-      if (finishedSentence || timedOut) {
-        stopMonitor();
-
-        if (state.recorder?.state === "recording") {
-          state.recorder.stop();
-        }
+      if (finished || maxDuration || noSpeech) {
+        stopRecording();
       }
     }, 100);
   }
 
-  toggleRecording = async function () {
-    if (state.recording) {
-      stopMonitor();
-      return original.toggleRecording();
-    }
+  async function processRecording(blob, auto) {
+    if (X.processing) return;
 
-    await original.toggleRecording();
-
-    if (
-      extra.autoTalk &&
-      state.recording &&
-      state.audioStream
-    ) {
-      startSilenceDetection(state.audioStream);
-    }
-  };
-
-  /*
-    錄音模式：
-    chat = 一般對話、命名與技能
-    transform = AI 黏土造型描述
-  */
-  finishRecording = async function () {
-    stopMonitor();
-
-    if (extra.recordingMode !== "transform") {
-      return original.finishRecording();
-    }
-
-    state.recording = false;
-    el("micButton").textContent = "🎙️ 開始說話";
-
-    state.audioStream?.getTracks().forEach(
-      track => track.stop()
-    );
-
-    state.audioStream = null;
+    X.processing = true;
 
     try {
-      const blob = new Blob(state.audioChunks, {
-        type: state.recorder?.mimeType || "audio/webm"
-      });
-
       if (!blob.size) {
-        throw Error("沒有收到錄音");
+        throw Error("沒有收到錄音資料");
       }
 
-      showStatus("🧠 正在辨識黏土變身指令……");
+      sayStatus("🧠 AI 正在辨識語音……");
 
       const wav = await wav16k(blob);
       const audio = await blobBase64(wav);
-      const result = await callAI("transcribe", { audio });
-      const description = String(result.text || "").trim();
 
-      if (!description) {
-        throw Error("沒有辨識到語音");
+      if (audio.length > 7000000) {
+        throw Error("錄音太長，請縮短句子");
       }
 
-      el("transformInput").value = description;
+      const result = await callAI(
+        "transcribe",
+        { audio },
+        120000
+      );
 
-      await transformHero(heroNow(), description);
+      const message = String(
+        result.text || ""
+      ).trim();
+
+      if (!message) {
+        sayStatus("沒有辨識到孩子說的話");
+
+        if (auto) {
+          stopAutoTalk(false);
+        }
+
+        return;
+      }
+
+      get("chatInput").value = message;
+
+      X.processing = false;
+
+      await sendChildMessage(message);
+
     } catch (error) {
-      showStatus("❌ 語音變身失敗：" + error.message);
+      sayStatus(
+        "❌ 語音辨識失敗：" + error.message
+      );
+
+      if (auto) {
+        stopAutoTalk(false);
+      }
     } finally {
-      state.recorder = null;
-      state.audioChunks = [];
-      extra.recordingMode = "chat";
+      X.processing = false;
+    }
+  }
+
+  /*
+    AI 指令處理
+
+    一次解析：
+    - 命名
+    - 新增技能
+    - 表演技能
+    - 多角色互動
+    - 場景事件
+    - 明確要求的黏土外型變身
+  */
+
+  async function sendChildMessage(text) {
+    const message = String(text || "").trim();
+
+    if (!message) return;
+
+    if (state.busy) return;
+
+    if (!state.heroes.length) {
+      sayStatus("請先創造至少一個黏土主角");
+      return;
+    }
+
+    state.busy = true;
+
+    const button = get("sendButton");
+    button.disabled = true;
+
+    get("chatInput").value = "";
+
+    chat("🧒 孩子", message);
+
+    sayStatus("🤖 AI 正在理解角色與技能……");
+
+    try {
+      const result = await callAI(
+        "mindspaceCommand",
+        {
+          message,
+          selectedHeroId: state.selectedId,
+          heroes: state.heroes.map(hero => ({
+            id: hero.id,
+            name: hero.name,
+            appearance: hero.appearance || "",
+            personality: hero.personality || "",
+            skills: safeArray(hero.skills).map(
+              normalizeSkill
+            )
+          })),
+          history: state.history.slice(-12),
+          activeScenes: state.scenes.map(
+            scene => scene.type
+          )
+        },
+        120000
+      );
+
+      // 1. 更新角色名字
+      for (const item of safeArray(result.renames)) {
+        const hero = heroById(item.heroId);
+
+        if (hero) {
+          renameHero(hero, item.name);
+        }
+      }
+
+      // 2. 記住新技能
+      for (const item of safeArray(result.skills)) {
+        const hero = heroById(item.heroId);
+
+        if (hero) {
+          learnSkill(hero, item);
+        }
+      }
+
+      // 3. 表演動態技能
+      for (const action of safeArray(result.actions)) {
+        const hero = heroById(action.heroId);
+
+        if (!hero) continue;
+
+        const skill = normalizeSkill({
+          name: action.name || action.type,
+          type: action.type,
+          color: action.color,
+          duration: action.duration
+        });
+
+        playSkill(hero, skill);
+      }
+
+      // 4. 世界故事事件
+      for (const scene of safeArray(result.scenes)) {
+        addScene(scene);
+      }
+
+      // 5. 只有明確要求外型改變才生成圖片
+      for (const item of safeArray(result.transforms)) {
+        const hero = heroById(item.heroId);
+
+        if (!hero || !item.description) continue;
+
+        try {
+          await transformHero(
+            hero,
+            item.description
+          );
+        } catch (error) {
+          sayStatus(
+            "⚠️ 黏土變身失敗：" + error.message
+          );
+        }
+      }
+
+      const speaker =
+        heroById(result.speakerId) ||
+        selectedHero() ||
+        state.heroes[0];
+
+      const reply = String(
+        result.reply ||
+        "哇！我們一起試試看吧！"
+      );
+
+      chat(
+        "🐠 " + speaker.name,
+        reply,
+        true
+      );
+
+      bubble(
+        "🐠 " + speaker.name + "：" + reply
+      );
+
+      state.history.push(
+        { role: "user", content: message },
+        { role: "assistant", content: reply }
+      );
+
+      if (state.history.length > 24) {
+        state.history.splice(
+          0,
+          state.history.length - 24
+        );
+      }
+
+      old.refreshHeroes();
+      rememberCharacters();
+
+      sayStatus("🌈 角色與技能已更新");
+
+      state.busy = false;
+      button.disabled = false;
+
+      await speakAndWait(reply);
+
+      // 關鍵：AI 語音真正結束後，自動開麥克風。
+      if (X.autoTalk) {
+        await wait(450);
+
+        if (
+          X.autoTalk &&
+          !X.listening &&
+          !X.processing
+        ) {
+          await beginRecording(true);
+        }
+      }
+
+    } catch (error) {
+      sayStatus("❌ " + error.message);
+
+      chat(
+        "⚠️ 系統",
+        error.message,
+        true
+      );
+
+      if (X.autoTalk) {
+        stopAutoTalk(false);
+      }
+
+    } finally {
+      state.busy = false;
+      button.disabled = false;
+    }
+  }
+
+  /*
+    自動對話
+  */
+
+  function updateAutoButton() {
+    const button = get("autoTalkButton");
+
+    if (!button) return;
+
+    button.textContent = X.autoTalk
+      ? "🛑 停止自動語音對話"
+      : "🎤 開始自動語音對話";
+
+    button.className = X.autoTalk
+      ? "full yellow"
+      : "full pink";
+  }
+
+  function stopAutoTalk(showMessage = true) {
+    X.autoTalk = false;
+    X.micToken++;
+
+    stopRecording();
+    cancelSpeech();
+    releaseMicrophone();
+
+    updateAutoButton();
+
+    if (showMessage) {
+      sayStatus("⏹️ 自動語音對話已停止");
+    }
+  }
+
+  async function startAutoTalk() {
+    if (X.autoTalk) {
+      stopAutoTalk();
+      return;
+    }
+
+    if (!state.bridgeReady) {
+      sayStatus("請先等待 AI 連線成功");
+      return;
+    }
+
+    if (!selectedHero()) {
+      sayStatus("請先創造一位黏土朋友");
+      return;
+    }
+
+    try {
+      // 使用者點擊時取得麥克風授權。
+      const stream =
+        await navigator.mediaDevices.getUserMedia({
+          audio: true
+        });
+
+      stream.getTracks().forEach(
+        track => track.stop()
+      );
+
+      X.autoTalk = true;
+
+      updateAutoButton();
+
+      const hero = selectedHero();
+
+      const greeting =
+        "你好呀！我是" + hero.name +
+        "！你可以幫我取名字，" +
+        "也可以告訴我有什麼神奇技能！";
+
+      chat(
+        "🐠 " + hero.name,
+        greeting,
+        true
+      );
+
+      bubble(
+        "🐠 " + hero.name + "：" + greeting
+      );
+
+      await speakAndWait(greeting);
+
+      if (X.autoTalk) {
+        await wait(450);
+        await beginRecording(true);
+      }
+
+    } catch (error) {
+      stopAutoTalk(false);
+
+      sayStatus(
+        "❌ 自動語音啟動失敗：" +
+        error.message
+      );
+    }
+  }
+
+  /*
+    新角色誕生：
+    每一隻都主動邀請命名。
+  */
+
+  function welcomeNewHero(hero) {
+    const greeting =
+      "哇！我誕生了！" +
+      "請幫我取個名字吧！" +
+      "我還會很多神奇的技能，" +
+      "你想讓我表演什麼呢？";
+
+    chat(
+      "🌈 新朋友",
+      greeting,
+      true
+    );
+
+    bubble("🌈 新朋友：" + greeting);
+
+    // 避免原本 welcomeHero 重複發聲。
+    speakAndWait(greeting).then(async () => {
+      if (X.autoTalk && !X.listening) {
+        await wait(450);
+        await beginRecording(true);
+      }
+    }).catch(error => {
+      sayStatus("⚠️ " + error.message);
+    });
+  }
+
+  saveHero = function () {
+    const existing = new Set(
+      state.heroes.map(h => h.id)
+    );
+
+    // 原本 saveHero 第一隻會呼叫 welcomeHero，
+    // 先暫時關閉語音，避免重複播報。
+    const previousVoice = state.voiceEnabled;
+
+    state.voiceEnabled = false;
+
+    try {
+      old.saveHero();
+    } finally {
+      state.voiceEnabled = previousVoice;
+    }
+
+    const hero = selectedHero();
+
+    if (hero && !existing.has(hero.id)) {
+      welcomeNewHero(hero);
+      rememberCharacters();
     }
   };
 
+  removeHero = function () {
+    old.removeHero();
+    rememberCharacters();
+  };
+
   /*
-    教師背景圖片
+    教師背景
   */
-  function applyBackground(src, name = "") {
-    extra.background = src || "";
-    extra.backgroundName = name;
 
-    const world = el("world");
+  function applyBackground(image, name = "") {
+    X.background = image || "";
+    X.backgroundName = name;
 
-    if (src) {
+    const world = get("world");
+
+    if (image) {
       world.style.backgroundImage =
-        `url("${src}")`;
-      world.style.backgroundPosition = "center";
+        `url("${image}")`;
+
       world.style.backgroundSize = "cover";
+      world.style.backgroundPosition = "center";
       world.style.backgroundRepeat = "no-repeat";
     } else {
       world.style.backgroundImage = "";
     }
 
-    const label = el("teacherBackgroundName");
+    const label = get("backgroundLabel");
 
     if (label) {
-      label.textContent = src
-        ? "目前背景：" + (name || "教師自訂圖片")
-        : "目前使用內建世界背景";
+      label.textContent = image
+        ? "目前背景：" + (name || "自訂背景")
+        : "目前使用內建世界";
     }
   }
-
-  async function uploadBackground(file) {
-    if (!file || !file.type.startsWith("image/")) {
-      throw Error("請選擇圖片檔案");
-    }
-
-    const data = await fileData(file);
-    const scaled = await scaledData(
-      data, 1400, "image/jpeg"
-    );
-
-    applyBackground(scaled, file.name);
-
-    try {
-      localStorage.setItem(
-        "mindspace_teacher_background",
-        JSON.stringify({
-          image: scaled,
-          name: file.name
-        })
-      );
-    } catch (error) {
-      showStatus(
-        "⚠️ 背景已套用，但瀏覽器儲存空間不足，重新整理後可能消失"
-      );
-      return;
-    }
-
-    showStatus("🖼️ 教師背景已更新");
-  }
-
-  /*
-    使用原本的 p5 畫布與角色動畫。
-    自訂背景時略過內建裝飾，避免遮住老師的圖片。
-  */
-  const originalDrawEnvironment = drawEnvironment;
 
   drawEnvironment = function (p, t) {
-    if (extra.background) return;
-    return originalDrawEnvironment(p, t);
+    if (X.background) return;
+    old.drawEnvironment(p, t);
   };
 
-  function installTeacherPanel() {
+  function installBackgroundSettings() {
     const section = document.createElement("section");
     section.className = "section";
 
     section.innerHTML = `
-      <h2>👩‍🏫 教師設定｜世界背景</h2>
+      <h2>👩‍🏫 教師設定｜自訂背景</h2>
       <p class="hint">
-        可上傳教師自行設計的背景，
-        不影響黏土角色與原本的世界切換。
+        可上傳海底、森林、太空或自製場景圖片。
       </p>
       <input
+        id="backgroundFile"
         type="file"
-        id="teacherBackgroundFile"
         accept="image/*"
         hidden
       >
       <div class="grid">
-        <button id="teacherUploadBackground" class="pink">
+        <button id="backgroundUpload" class="pink">
           🖼️ 上傳背景
         </button>
-        <button id="teacherResetBackground" class="blue">
-          ↩️ 恢復內建背景
+        <button id="backgroundReset" class="blue">
+          ↩️ 恢復內建
         </button>
       </div>
-      <p id="teacherBackgroundName" class="hint">
-        目前使用內建世界背景
+      <p id="backgroundLabel" class="hint">
+        目前使用內建世界
       </p>
     `;
 
-    const sections = document.querySelectorAll(
-      "#sidebar .section"
-    );
+    const worldSection =
+      get("worldSelect").closest(".section");
 
-    const worldSection = [...sections].find(
-      section => section.querySelector("#worldSelect")
-    );
+    worldSection.after(section);
 
-    if (worldSection) {
-      worldSection.after(section);
-    } else {
-      el("sidebar").appendChild(section);
-    }
-
-    el("teacherUploadBackground").onclick = () => {
-      el("teacherBackgroundFile").click();
+    get("backgroundUpload").onclick = () => {
+      get("backgroundFile").click();
     };
 
-    el("teacherBackgroundFile").onchange = async event => {
-      try {
-        await uploadBackground(event.target.files[0]);
-      } catch (error) {
-        showStatus("❌ 背景上傳失敗：" + error.message);
-      }
-    };
+    get("backgroundFile").onchange =
+      async event => {
+        try {
+          const file = event.target.files?.[0];
 
-    el("teacherResetBackground").onclick = () => {
+          if (!file) return;
+
+          const data = await fileData(file);
+
+          const image = await scaledData(
+            data,
+            1400,
+            "image/jpeg"
+          );
+
+          applyBackground(image, file.name);
+
+          try {
+            localStorage.setItem(
+              "mindspace_teacher_background",
+              JSON.stringify({
+                image,
+                name: file.name
+              })
+            );
+          } catch (_) {
+            sayStatus(
+              "⚠️ 背景已套用，但儲存空間不足"
+            );
+          }
+
+        } catch (error) {
+          sayStatus(
+            "❌ 背景上傳失敗：" +
+            error.message
+          );
+        }
+      };
+
+    get("backgroundReset").onclick = () => {
       localStorage.removeItem(
         "mindspace_teacher_background"
       );
 
       applyBackground("", "");
-      el("worldSelect").dispatchEvent(
+
+      get("worldSelect").dispatchEvent(
         new Event("change")
       );
     };
@@ -641,145 +1333,189 @@
       );
 
       if (saved?.image) {
-        applyBackground(saved.image, saved.name || "");
+        applyBackground(
+          saved.image,
+          saved.name
+        );
       }
     } catch (_) {}
-  }
 
-  function installVoiceControls() {
-    const conversationSection =
-      el("micButton").closest(".section");
-
-    const button = document.createElement("button");
-    button.id = "autoTalkButton";
-    button.className = "full pink";
-    button.textContent = "🎤 開始自動語音對話";
-
-    conversationSection.appendChild(button);
-
-    const hint = document.createElement("p");
-    hint.className = "hint";
-    hint.textContent =
-      "開啟後，角色說完話會自動聆聽孩子回答。" +
-      "請先允許麥克風權限，結束時按停止。";
-
-    conversationSection.appendChild(hint);
-
-    button.onclick = async () => {
-      if (extra.autoTalk) {
-        stopAutoConversation();
-        return;
-      }
-
-      if (!state.bridgeReady) {
-        showStatus("請先等待 GAS 連線成功");
-        return;
-      }
-
-      try {
-        // 在使用者點擊時先要求權限。
-        const stream =
-          await navigator.mediaDevices.getUserMedia({
-            audio: true
-          });
-
-        stream.getTracks().forEach(track => track.stop());
-
-        extra.autoTalk = true;
-        extra.recordingMode = "chat";
-        extra.conversationGeneration++;
-
-        setAutoButton();
-
-        const hero = heroNow();
-
-        if (hero) {
-          const promptText =
-            `你好！我是${hero.name}！` +
-            "你想跟我說什麼？";
-
-          bubble("🎤 " + promptText);
-          await speak(promptText);
-        } else {
-          showStatus(
-            "🎤 自動對話已開啟，請先創造黏土角色"
+    get("worldSelect").addEventListener(
+      "change",
+      () => {
+        if (X.background) {
+          applyBackground(
+            X.background,
+            X.backgroundName
           );
         }
-      } catch (error) {
-        stopAutoConversation();
-        showStatus(
-          "❌ 無法開啟麥克風：" + error.message
-        );
       }
-    };
-
-    const transformSection =
-      el("transformButton").closest(".section");
-
-    const transformMic = document.createElement("button");
-    transformMic.id = "transformMicButton";
-    transformMic.className = "full mint";
-    transformMic.textContent = "🎙️ 用說的修改黏土造型";
-
-    transformSection.appendChild(transformMic);
-
-    transformMic.onclick = async () => {
-      if (state.recording) {
-        await toggleRecording();
-        return;
-      }
-
-      if (!heroNow()) {
-        showStatus("請先創造黏土角色");
-        return;
-      }
-
-      extra.recordingMode = "transform";
-
-      try {
-        await toggleRecording();
-        showStatus(
-          "🎨 請描述想增加的黏土造型，說完再按一次按鈕"
-        );
-      } catch (error) {
-        extra.recordingMode = "chat";
-        showStatus("❌ " + error.message);
-      }
-    };
-
-    // 使用原本的停止聲音按鈕，
-    // 同時允許結束自動對話。
-    el("stopVoice").addEventListener(
-      "click",
-      stopAutoConversation
     );
   }
 
   /*
-    原本 setupButtons 仍會完整執行。
-    擴充控制項在原本按鈕完成綁定後才加入。
+    將原本沒有完整接線的技能與語音按鈕
+    改成確實執行新功能。
+
+    用 cloneNode 移除舊事件，
+    不影響其他既有按鈕。
   */
-  setupButtons = function () {
-    original.setupButtons();
 
-    installTeacherPanel();
-    installVoiceControls();
+  function replaceButton(id, handler) {
+    const oldButton = get(id);
 
-    el("worldSelect").addEventListener(
-      "change",
-      () => {
-        // 切換內建世界不會刪掉教師圖片。
-        if (extra.background) {
-          applyBackground(
-            extra.background,
-            extra.backgroundName
+    if (!oldButton) return;
+
+    const button = oldButton.cloneNode(true);
+
+    oldButton.replaceWith(button);
+
+    button.addEventListener("click", () => {
+      Promise.resolve()
+        .then(handler)
+        .catch(error => {
+          sayStatus("❌ " + error.message);
+        });
+    });
+  }
+
+  function installControls() {
+    const conversationSection =
+      get("micButton").closest(".section");
+
+    const autoButton =
+      document.createElement("button");
+
+    autoButton.id = "autoTalkButton";
+    autoButton.className = "full pink";
+    autoButton.textContent =
+      "🎤 開始自動語音對話";
+
+    conversationSection.appendChild(autoButton);
+
+    autoButton.onclick = startAutoTalk;
+
+    const hint = document.createElement("p");
+    hint.className = "hint";
+
+    hint.textContent =
+      "AI 說完會自動聆聽，孩子說完後會自動辨識。" +
+      "首次使用需允許麥克風權限。";
+
+    conversationSection.appendChild(hint);
+
+    replaceButton("micButton", async () => {
+      if (X.listening) {
+        stopRecording();
+      } else {
+        await beginRecording(false);
+      }
+    });
+
+    replaceButton("sendButton", async () => {
+      await sendChildMessage(
+        get("chatInput").value
+      );
+    });
+
+    // 原本技能按鈕現在真正執行動態技能。
+    replaceButton("skillButton", () => {
+      playRememberedSkill(selectedHero());
+    });
+
+    // 只有外型變化才使用 AI 圖片生成。
+    replaceButton("transformButton", async () => {
+      const hero = selectedHero();
+      const description =
+        get("transformInput").value.trim();
+
+      if (!hero) {
+        throw Error("請先選擇主角");
+      }
+
+      if (!description) {
+        throw Error("請描述想改變的黏土外型");
+      }
+
+      const button = get("transformButton");
+
+      button.disabled = true;
+
+      try {
+        await transformHero(
+          hero,
+          description
+        );
+      } finally {
+        button.disabled = false;
+      }
+    });
+
+    replaceButton("stopVoice", () => {
+      stopAutoTalk();
+    });
+
+    // Enter 送出改走新 AI 指令。
+    const oldInput = get("chatInput");
+    const newInput = oldInput.cloneNode(true);
+
+    oldInput.replaceWith(newInput);
+
+    newInput.addEventListener(
+      "keydown",
+      event => {
+        if (
+          event.key === "Enter" &&
+          !event.shiftKey &&
+          !event.isComposing
+        ) {
+          event.preventDefault();
+
+          sendChildMessage(
+            newInput.value
           );
         }
       }
     );
+
+    // 重新建立角色時，確保原本事件仍能使用
+    // 新版 saveHero 函式。
+    replaceButton("saveEditor", () => {
+      saveHero();
+    });
+
+    replaceButton("deleteHero", () => {
+      removeHero();
+    });
+
+    // 刪除所有主角時清除角色記憶。
+    get("resetButton").addEventListener(
+      "click",
+      () => {
+        if (!state.heroes.length) {
+          localStorage.removeItem(
+            X.memoryKey
+          );
+        }
+      }
+    );
+  }
+
+  /*
+    初始化
+
+    保留原本 setupButtons 的所有功能。
+  */
+
+  setupButtons = function () {
+    old.setupButtons();
+
+    installBackgroundSettings();
+    installControls();
+
+    console.log(
+      "[Mindspace] 動態技能與自動語音功能已啟動"
+    );
   };
 
-  console.log(
-    "[Mindspace Extra] 擴充功能已載入，原 GAS Bridge 未修改"
-  );
 })();
