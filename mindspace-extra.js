@@ -208,11 +208,12 @@
     ]);
 
     if (movementTypes.has(skill.type)) {
-      performAction({
-        heroId: hero.id,
-        type: skill.type,
-        duration: skill.duration
-      });
+performAction({
+  heroId: hero.id,
+  type: skill.type,
+  targetId: input.targetId || "",
+  duration: skill.duration
+});    
     }
 
     if (skill.type === "teleport") {
