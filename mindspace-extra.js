@@ -1018,21 +1018,11 @@ function playCharacterInteraction(action) {
         }
       }
 
-      // 3. 表演動態技能
-      for (const action of safeArray(result.actions)) {
-        const hero = heroById(action.heroId);
-
-        if (!hero) continue;
-
-        const skill = normalizeSkill({
-          name: action.name || action.type,
-          type: action.type,
-          color: action.color,
-          duration: action.duration
-        });
-
-        playSkill(hero, skill);
-      }
+    
+      // 3. 執行單角色及雙角色動態互動
+for (const action of safeArray(result.actions)) {
+  playCharacterInteraction(action);
+}
 
       // 4. 世界故事事件
       for (const scene of safeArray(result.scenes)) {
