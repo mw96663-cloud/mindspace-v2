@@ -239,6 +239,93 @@ performAction({
       "⚡ " + hero.name + "正在表演：" + skill.name
     );
   }
+  
+/*
+  Mindspace 雙角色互動動畫
+
+  支援：
+  - 互相靠近
+  - 追逐
+  - 繞圈
+  - 一起跳舞
+  - 一起旋轉
+  - 一起飛行
+*/
+
+function playCharacterInteraction(action) {
+  const hero = heroById(action.heroId);
+
+  if (!hero) return;
+
+  const target = heroById(action.targetId);
+
+  const type = String(action.type || "meet");
+  const duration = Math.max(
+    1,
+    Math.min(20, Number(action.duration) || 7)
+  );
+
+  if (!target || hero.id === target.id) {
+    playSkill(hero, action);
+    return;
+  }
+
+  // 追逐：主角追著目標移動。
+  if (type === "follow") {
+    performAction({
+      heroId: hero.id,
+      targetId: target.id,
+      type: "follow",
+      duration
+    });
+
+    return;
+  }
+
+  // 靠近：主角與目標朝彼此移動。
+  if (type === "meet") {
+    performAction({
+      heroId: hero.id,
+      targetId: target.id,
+      type: "meet",
+      duration
+    });
+
+    performAction({
+      heroId: target.id,
+      targetId: hero.id,
+      type: "meet",
+      duration
+    });
+
+    return;
+  }
+
+  // 繞圈：主角圍繞目標移動。
+  if (type === "circle") {
+    performAction({
+      heroId: hero.id,
+      targetId: target.id,
+      type: "circle",
+      duration
+    });
+
+    return;
+  }
+
+  // 一起表演：兩個角色同時執行動畫。
+  if ([
+    "dance", "spin", "fly",
+    "jump", "bounce", "shake"
+  ].includes(type)) {
+    playSkill(hero, action);
+    playSkill(target, action);
+    return;
+  }
+
+  // 其他技能由指定角色執行。
+  playSkill(hero, action);
+}
 
   function playRememberedSkill(hero) {
     if (!hero) {
