@@ -1,180 +1,150 @@
 
 "use strict";
 
-/*
-  Mindspace AI Director
-  AI 產生動畫時間軸，瀏覽器負責執行。
-  不執行 AI 回傳的任意 JavaScript。
-*/
+/* =========================================================
+   MINDSPACE V2 — AI DIRECTOR
+   開放式故事、黏土角色、動作時間軸、技能記憶
+   相容新版 sketch.js 的 original / transformed 資料結構
+========================================================= */
 
 (function () {
+  const APP = "Mindspace AI Director";
+
   const old = {
     setupButtons,
     animateHeroes,
     drawScenes,
-    saveHero,
-    stopSpeech
+    saveHero
   };
 
   const D = {
     timeline: [],
     objects: new Map(),
-    skills: new Map(),
     busy: false,
-    auto: false,
+    autoTalk: false,
     recording: false,
-    rec: null,
+    recorder: null,
     stream: null,
-    audio: null,
-    utterance: null,
-    micTimer: null,
-    key: "mindspace_ai_director_skills"
+    timer: null,
+    speaking: false,
+    storageKey: "mindspace_v2_ai_skills"
   };
 
-  const byId = id =>
+  const getHero = id =>
     state.heroes.find(h => h.id === id);
 
-  const num = (x, a, b, d) =>
-    Math.max(
-      a,
-      Math.min(b, Number.isFinite(+x) ? +x : d)
+  const arr = value =>
+    Array.isArray(value) ? value : [];
+
+  const str = (value, max = 200) =>
+    String(value ?? "").slice(0, max);
+
+  const num = (value, min, max, fallback) => {
+    const n = Number(value);
+    return clamp(
+      Number.isFinite(n) ? n : fallback,
+      min,
+      max
     );
+  };
 
-  const arr = x =>
-    Array.isArray(x) ? x : [];
+  const validColor = value =>
+    /^#[0-9a-fA-F]{6}$/.test(value || "")
+      ? value
+      : "#ffd2e5";
 
-  const str = (x, n = 100) =>
-    String(x ?? "").slice(0, n);
-
-  const wait = ms =>
-    new Promise(r => setTimeout(r, ms));
-
-  const color = x =>
-    /^#[0-9a-fA-F]{6}$/.test(x || "")
-      ? x
-      : "#ffd5e7";
-
-  const ease = x => {
-    x = Math.max(0, Math.min(1, x));
+  const ease = value => {
+    const x = clamp(value, 0, 1);
     return x * x * (3 - 2 * x);
   };
 
-  const objPos = id => {
-    const o = D.objects.get(id);
-    return o ? { x: o.x, y: o.y } : null;
-  };
+  const wait = ms =>
+    new Promise(resolve => setTimeout(resolve, ms));
 
-  function showMessage(s) {
-    status(s);
-  }
+  /* ===== AI 動作資料安全轉換 ===== */
 
-  function store() {
-    try {
-      localStorage.setItem(
-        D.key,
-        JSON.stringify(
-          state.heroes.map(h => ({
-            name: h.name,
-            skills: arr(h.aiSkills)
-          }))
-        )
-      );
-    } catch (e) {
-      console.warn(e);
-    }
-  }
+  const OPERATIONS = new Set([
+    "move",
+    "turn",
+    "scale",
+    "fade",
+    "shake",
+    "pulse",
+    "orbit",
+    "emit",
+    "create",
+    "remove",
+    "morph",
+    "wait",
+    "speak"
+  ]);
 
-  function load() {
-    try {
-      return JSON.parse(
-        localStorage.getItem(D.key) || "[]"
-      );
-    } catch (_) {
-      return [];
-    }
-  }
-
-  function attachSkills(h) {
-    const item = load().find(
-      x => x.name === h.name
-    );
-
-    if (item && !h.aiSkills) {
-      h.aiSkills = arr(item.skills);
-    }
-  }
-
-  function normalizeStep(step) {
-    if (!step || typeof step !== "object") {
+  function normalizeStep(raw) {
+    if (!raw || typeof raw !== "object") {
       return null;
     }
 
-    const ops = new Set([
-      "move",
-      "turn",
-      "scale",
-      "fade",
-      "shake",
-      "pulse",
-      "orbit",
-      "emit",
-      "create",
-      "remove",
-      "morph",
-      "wait",
-      "speak"
-    ]);
+    const op = str(raw.op, 30);
 
-    if (!ops.has(step.op)) return null;
+    if (!OPERATIONS.has(op)) {
+      return null;
+    }
 
     return {
-      op: step.op,
+      op,
 
-      heroId: str(step.heroId, 80),
-      targetId: str(step.targetId, 80),
-      objectId: str(step.objectId, 80),
+      heroId: str(raw.heroId, 80),
+      targetId: str(raw.targetId, 80),
+      objectId: str(raw.objectId, 80),
 
-      at: num(step.at, 0, 45, 0),
-      duration: num(step.duration, 0.2, 20, 3),
+      at: num(raw.at, 0, 45, 0),
+      duration: num(raw.duration, 0.1, 20, 3),
 
-      x: num(step.x, 0, 1, 0.5),
-      y: num(step.y, 0, 1, 0.5),
+      x: num(raw.x, 0, 1, 0.5),
+      y: num(raw.y, 0, 1, 0.5),
 
-      amount: num(step.amount, -5, 5, 1),
-      angle: num(step.angle, -720, 720, 0),
+      amount: num(raw.amount, -5, 5, 1),
+      angle: num(raw.angle, -720, 720, 0),
 
-      count: num(step.count, 1, 60, 14),
-      size: num(step.size, 8, 240, 72),
+      count: num(raw.count, 1, 60, 14),
+      size: num(raw.size, 8, 240, 70),
 
-      color: color(step.color),
-      shape: str(step.shape, 30),
-      label: str(step.label, 32),
-      description: str(step.description, 180),
-      emoji: str(step.emoji, 8),
+      color: validColor(raw.color),
 
-      path: arr(step.path)
+      shape: str(raw.shape, 40),
+      label: str(raw.label, 35),
+      emoji: str(raw.emoji, 8),
+
+      description: str(raw.description, 300),
+
+      path: arr(raw.path)
         .slice(0, 16)
-        .map(pt => ({
-          x: num(pt.x, 0, 1, 0.5),
-          y: num(pt.y, 0, 1, 0.5)
+        .map(point => ({
+          x: num(point?.x, 0, 1, 0.5),
+          y: num(point?.y, 0, 1, 0.5)
         }))
     };
   }
+
+  /* ===== AI 時間軸 ===== */
 
   function addTimeline(steps) {
     const start = performance.now();
 
     for (const raw of arr(steps).slice(0, 40)) {
-      const s = normalizeStep(raw);
+      const step = normalizeStep(raw);
 
-      if (!s) continue;
+      if (!step) continue;
 
       D.timeline.push({
-        ...s,
-        start: start + s.at * 1000,
+        ...step,
+
+        start: start + step.at * 1000,
+
         end:
           start +
-          (s.at + s.duration) * 1000,
+          (step.at + step.duration) * 1000,
+
         created: false,
         from: null
       });
@@ -183,226 +153,111 @@
     D.timeline = D.timeline.slice(-100);
   }
 
-  function heroCenter(h) {
-    return {
-      x: h.x,
-      y: h.y
-    };
-  }
+  function getPosition(id) {
+    const hero = getHero(id);
 
-  function targetPoint(s) {
-    const target =
-      byId(s.targetId) ||
-      objPos(s.targetId);
-
-    return target
-      ? { x: target.x, y: target.y }
-      : { x: s.x, y: s.y };
-  }
-
-  function animateStep(s, now) {
-    const h = byId(s.heroId);
-
-    const p = ease(
-      (now - s.start) /
-      (s.duration * 1000)
-    );
-
-    // 建立新的故事物件
-    if (s.op === "create" && !s.created) {
-      const owner = byId(s.heroId);
-
-      const pt = owner
-        ? heroCenter(owner)
-        : { x: s.x, y: s.y };
-
-      const id =
-        s.objectId ||
-        (
-          "object-" +
-          Math.random().toString(36).slice(2)
-        );
-
-      D.objects.set(id, {
-        id,
-
-        x:
-          s.x === 0.5 && owner
-            ? Math.min(0.9, pt.x + 0.13)
-            : s.x,
-
-        y:
-          s.y === 0.5 && owner
-            ? pt.y
-            : s.y,
-
-        size: s.size,
-        color: s.color,
-        shape: s.shape,
-        label: s.label,
-        emoji: s.emoji,
-        description: s.description,
-        created: now
-      });
-
-      s.created = true;
-    }
-
-    // 移除故事物件
-    if (s.op === "remove" && !s.created) {
-      D.objects.delete(s.objectId);
-      s.created = true;
-    }
-
-    if (!h) return;
-
-    if (!s.from) {
-      s.from = {
-        x: h.x,
-        y: h.y
+    if (hero) {
+      return {
+        x: hero.x,
+        y: hero.y
       };
     }
 
-    // 自由路徑移動
-    if (s.op === "move") {
-      const dest = targetPoint(s);
+    const object = D.objects.get(id);
 
-      if (s.path.length) {
-        const points = [
-          s.from,
-          ...s.path
-        ];
-
-        const f =
-          p * (points.length - 1);
-
-        const i = Math.min(
-          points.length - 2,
-          Math.floor(f)
-        );
-
-        const q = ease(f - i);
-
-        h.x =
-          points[i].x +
-          (
-            points[i + 1].x -
-            points[i].x
-          ) * q;
-
-        h.y =
-          points[i].y +
-          (
-            points[i + 1].y -
-            points[i].y
-          ) * q;
-
-      } else {
-        h.x =
-          s.from.x +
-          (dest.x - s.from.x) * p;
-
-        h.y =
-          s.from.y +
-          (dest.y - s.from.y) * p;
-      }
+    if (object) {
+      return {
+        x: object.x,
+        y: object.y
+      };
     }
 
-    // 繞著目標移動
-    if (s.op === "orbit") {
-      const c = targetPoint(s);
-
-      const a =
-        p *
-        Math.PI *
-        2 *
-        Math.max(
-          0.2,
-          Math.abs(s.amount)
-        );
-
-      h.x =
-        c.x +
-        Math.cos(a) * 0.13;
-
-      h.y =
-        c.y +
-        Math.sin(a) * 0.12;
-    }
-
-    // 水平轉身，不上下顛倒
-    if (s.op === "turn") {
-      h.aiTurn = Math.cos(
-        p *
-        Math.PI *
-        2 *
-        Math.max(
-          0.5,
-          Math.abs(s.amount)
-        )
-      );
-    }
-
-    if (s.op === "scale") {
-      h.aiScale =
-        1 +
-        (s.amount - 1) *
-        Math.sin(Math.PI * p);
-    }
-
-    if (s.op === "fade") {
-      h.aiOpacity = Math.max(
-        0.05,
-        1 -
-        (
-          1 -
-          Math.max(0, s.amount)
-        ) *
-        Math.sin(Math.PI * p)
-      );
-    }
-
-    if (s.op === "shake") {
-      h.aiOffset =
-        Math.sin(p * 45) *
-        num(s.amount, -5, 5, 1) *
-        6;
-    }
-
-    if (s.op === "pulse") {
-      h.aiScale =
-        1 +
-        Math.sin(p * 25) *
-        Math.abs(s.amount) *
-        0.13;
-    }
+    return null;
   }
 
-  function drawObject(p, o, t) {
-    const x = o.x * p.width;
-    const y = o.y * p.height;
-    const size = o.size;
+  function destination(step) {
+    return getPosition(step.targetId) || {
+      x: step.x,
+      y: step.y
+    };
+  }
+
+  /* ===== 黏土質感的數位物件 ===== */
+
+  function createObject(step) {
+    const owner = getHero(step.heroId);
+
+    const id =
+      step.objectId || uid();
+
+    const x =
+      owner && step.x === 0.5
+        ? clamp(owner.x + 0.15, 0.05, 0.95)
+        : step.x;
+
+    const y =
+      owner && step.y === 0.5
+        ? owner.y
+        : step.y;
+
+    D.objects.set(id, {
+      id,
+      x,
+      y,
+      size: step.size,
+      shape: step.shape,
+      color: step.color,
+      label: step.label,
+      emoji: step.emoji,
+      description: step.description,
+      created: performance.now()
+    });
+  }
+
+  function drawClayObject(p, object, t) {
+    const x = object.x * p.width;
+    const y = object.y * p.height;
+    const size = object.size;
 
     p.push();
     p.translate(x, y);
+
+    const wobble =
+      Math.sin(t * 2 + x) * 0.035;
+
+    p.rotate(wobble);
+
+    // 黏土的柔和投影
     p.noStroke();
-    p.fill(o.color);
+    p.fill(45, 35, 55, 35);
+
+    p.ellipse(
+      5,
+      size * 0.43,
+      size * 0.85,
+      size * 0.18
+    );
 
     const shape =
-      o.shape.toLowerCase();
+      object.shape.toLowerCase();
+
+    const c = p.color(object.color);
+
+    p.fill(c);
+    p.stroke(110, 75, 100, 45);
+    p.strokeWeight(1.5);
 
     if (shape === "star") {
       p.beginShape();
 
       for (let i = 0; i < 10; i++) {
         const a =
-          -Math.PI / 2 +
-          i * Math.PI / 5;
+          -Math.PI / 2 + i * Math.PI / 5;
 
         const r =
           i % 2
             ? size * 0.22
-            : size * 0.5;
+            : size * 0.48;
 
         p.vertex(
           Math.cos(a) * r,
@@ -413,183 +268,340 @@
       p.endShape(p.CLOSE);
 
     } else if (
-      shape === "rect" ||
-      shape === "house" ||
-      shape === "square"
+      ["square", "rect", "house"].includes(shape)
     ) {
       p.rectMode(p.CENTER);
 
       p.rect(
         0,
         0,
-        size,
-        size * 0.8,
-        12
+        size * 0.85,
+        size * 0.78,
+        size * 0.12
       );
 
       if (shape === "house") {
-        p.fill("#ff9eac");
+        p.fill("#e8a4b5");
 
         p.triangle(
-          -size * 0.6,
+          -size * 0.5,
           -size * 0.35,
           0,
-          -size,
-          size * 0.6,
+          -size * 0.85,
+          size * 0.5,
           -size * 0.35
         );
-      }
-
-    } else if (shape === "egg") {
-      p.ellipse(
-        0,
-        0,
-        size * 0.7,
-        size
-      );
-
-      const age =
-        (
-          performance.now() -
-          o.created
-        ) / 1000;
-
-      if (age > 2) {
-        p.noFill();
-        p.stroke("#b98c78");
-        p.strokeWeight(3);
-
-        p.beginShape();
-
-        for (let i = 0; i < 7; i++) {
-          p.vertex(
-            -size * 0.3 +
-            i * size * 0.1,
-            i % 2 ? 0 : 8
-          );
-        }
-
-        p.endShape();
-      }
-
-      if (age > 5) {
-        p.noStroke();
-        p.fill("#ffbad6");
-
-        p.circle(
-          0,
-          -size * 0.3,
-          size * 0.4
-        );
-
-        p.fill("#35304b");
-        p.circle(-6, -size * 0.34, 3);
-        p.circle(6, -size * 0.34, 3);
       }
 
     } else if (shape === "triangle") {
       p.triangle(
         0,
         -size * 0.5,
-        -size * 0.5,
+        -size * 0.45,
         size * 0.4,
-        size * 0.5,
+        size * 0.45,
         size * 0.4
       );
 
-    } else {
-      p.circle(0, 0, size);
-    }
-
-    if (o.emoji) {
-      p.textAlign(
-        p.CENTER,
-        p.CENTER
-      );
-
-      p.textSize(
-        Math.max(
-          16,
-          size * 0.55
-        )
-      );
-
-      p.text(
-        o.emoji,
+    } else if (shape === "egg") {
+      p.ellipse(
         0,
+        0,
+        size * 0.72,
+        size
+      );
+
+    } else if (shape === "line") {
+      p.strokeWeight(
+        Math.max(6, size * 0.13)
+      );
+
+      p.line(
+        -size * 0.45,
+        0,
+        size * 0.45,
         0
       );
+
+    } else {
+      // 未指定形狀時仍然有基本可見造型
+      p.ellipse(
+        0,
+        0,
+        size,
+        size * 0.9
+      );
     }
 
-    if (o.label) {
-      p.fill("#fff");
-      p.stroke("#584f68");
-      p.strokeWeight(3);
-      p.textSize(15);
-      p.textAlign(p.CENTER);
+    // 手捏黏土的高光與不規則小斑點
+    p.noStroke();
+
+    p.fill(255, 255, 255, 75);
+
+    p.ellipse(
+      -size * 0.18,
+      -size * 0.2,
+      size * 0.27,
+      size * 0.14
+    );
+
+    for (let i = 0; i < 12; i++) {
+      const a = i * 2.39996;
+      const r = size * (0.08 + (i % 4) * 0.06);
+
+      p.fill(
+        255,
+        255,
+        255,
+        20 + (i % 3) * 10
+      );
+
+      p.circle(
+        Math.cos(a) * r,
+        Math.sin(a) * r,
+        2 + i % 3
+      );
+    }
+
+    if (object.emoji) {
+      p.textAlign(p.CENTER, p.CENTER);
+      p.textSize(Math.max(16, size * 0.5));
+      p.text(object.emoji, 0, 0);
+    }
+
+    if (object.label) {
+      p.textAlign(p.CENTER, p.CENTER);
+      p.textSize(13);
+      p.noStroke();
+
+      p.fill(255, 255, 255, 225);
+
+      p.rectMode(p.CENTER);
+      p.rect(
+        0,
+        size * 0.7,
+        Math.max(60, object.label.length * 15),
+        25,
+        12
+      );
+
+      p.fill("#58466a");
 
       p.text(
-        o.label,
+        object.label,
         0,
-        size * 0.65
+        size * 0.7
       );
     }
 
     p.pop();
   }
 
-  function drawEmissions(p, s, now) {
-    const h = byId(s.heroId);
-    const o = objPos(s.objectId);
+  /* ===== AI 動作演算 ===== */
 
-    const origin = h
-      ? heroCenter(h)
-      : o || {
-          x: s.x,
-          y: s.y
-        };
+  function animateStep(step, now) {
+    if (
+      step.op === "create" &&
+      !step.created
+    ) {
+      createObject(step);
+      step.created = true;
+    }
 
-    const time =
-      (now - s.start) / 1000;
+    if (
+      step.op === "remove" &&
+      !step.created
+    ) {
+      D.objects.delete(step.objectId);
+      step.created = true;
+    }
+
+    const hero = getHero(step.heroId);
+
+    if (!hero) return;
+
+    if (!step.from) {
+      step.from = {
+        x: hero.x,
+        y: hero.y
+      };
+    }
+
+    const progress = ease(
+      (now - step.start) /
+      (step.duration * 1000)
+    );
+
+    if (step.op === "move") {
+      if (step.path.length) {
+        const points = [
+          step.from,
+          ...step.path
+        ];
+
+        const index =
+          progress * (points.length - 1);
+
+        const i = Math.min(
+          points.length - 2,
+          Math.floor(index)
+        );
+
+        const fraction = ease(index - i);
+
+        hero.x =
+          points[i].x +
+          (points[i + 1].x - points[i].x) *
+          fraction;
+
+        hero.y =
+          points[i].y +
+          (points[i + 1].y - points[i].y) *
+          fraction;
+
+      } else {
+        const to = destination(step);
+
+        hero.x =
+          step.from.x +
+          (to.x - step.from.x) *
+          progress;
+
+        hero.y =
+          step.from.y +
+          (to.y - step.from.y) *
+          progress;
+      }
+    }
+
+    if (step.op === "orbit") {
+      const center = destination(step);
+
+      const angle =
+        progress *
+        Math.PI *
+        2 *
+        Math.max(
+          0.25,
+          Math.abs(step.amount)
+        );
+
+      hero.x =
+        center.x +
+        Math.cos(angle) * 0.13;
+
+      hero.y =
+        center.y +
+        Math.sin(angle) * 0.12;
+    }
+
+    // 左右水平翻身，不是上下顛倒
+    if (step.op === "turn") {
+      hero.aiTurn =
+        Math.cos(
+          progress *
+          Math.PI *
+          2 *
+          Math.max(
+            0.5,
+            Math.abs(step.amount)
+          )
+        );
+    }
+
+    if (step.op === "scale") {
+      hero.aiScale =
+        1 +
+        (step.amount - 1) *
+        Math.sin(Math.PI * progress);
+    }
+
+    if (step.op === "fade") {
+      hero.aiOpacity =
+        clamp(
+          1 -
+          (1 - Math.max(0, step.amount)) *
+          Math.sin(Math.PI * progress),
+          0.05,
+          1
+        );
+    }
+
+    if (step.op === "shake") {
+      hero.aiOffset =
+        Math.sin(progress * 45) *
+        step.amount *
+        6;
+    }
+
+    if (step.op === "pulse") {
+      hero.aiScale =
+        1 +
+        Math.sin(progress * 25) *
+        Math.abs(step.amount) *
+        0.13;
+    }
+
+    if (step.op === "morph") {
+      hero.aiScale =
+        1 +
+        Math.sin(Math.PI * progress) *
+        Math.abs(step.amount) *
+        0.15;
+    }
+  }
+
+  /* ===== 粒子與能力特效 ===== */
+
+  function drawEmissions(p, step, now) {
+    const origin =
+      getPosition(step.heroId) ||
+      getPosition(step.objectId) ||
+      {
+        x: step.x,
+        y: step.y
+      };
+
+    const seconds =
+      (now - step.start) / 1000;
 
     const count =
-      Math.round(s.count);
+      Math.round(step.count);
 
     p.push();
     p.noStroke();
-    p.fill(s.color);
 
     for (let i = 0; i < count; i++) {
-      const a =
+      const angle =
         i * 2.39996 +
-        time * (s.amount || 1);
+        seconds * step.amount;
 
-      const r =
+      const radius =
         12 +
-        (
-          time * 32 +
-          i * 11
-        ) % 110;
+        (seconds * 32 + i * 11) % 110;
 
       const x =
         origin.x * p.width +
-        Math.cos(a) * r;
+        Math.cos(angle) * radius;
 
       const y =
         origin.y * p.height +
-        Math.sin(a) * r;
+        Math.sin(angle) * radius;
 
-      if (s.emoji) {
+      if (step.emoji) {
         p.textSize(
-          12 + (i % 3) * 5
+          12 + i % 3 * 5
         );
 
         p.text(
-          s.emoji,
+          step.emoji,
           x,
           y
         );
+
       } else {
+        p.fill(step.color);
+
         p.circle(
           x,
           y,
@@ -601,251 +613,265 @@
     p.pop();
   }
 
-  const oldAnimate =
-    old.animateHeroes;
+  /* ===== 接管原本角色動畫 ===== */
 
   animateHeroes = function (p, t) {
     const now = performance.now();
 
-    for (const h of state.heroes) {
-      h.aiTurn = 1;
-      h.aiScale = 1;
-      h.aiOpacity = 1;
-      h.aiOffset = 0;
+    for (const hero of state.heroes) {
+      hero.aiTurn = 1;
+      hero.aiScale = 1;
+      hero.aiOpacity = 1;
+      hero.aiOffset = 0;
     }
 
-    // 保留原本的角色動畫
-    oldAnimate(p, t);
+    // 保留 sketch.js 原本的自主移動
+    old.animateHeroes(p, t);
 
-    // 執行 AI 產生的動畫時間軸
-    for (const s of D.timeline) {
+    const activeHeroes = new Set();
+
+    for (const step of D.timeline) {
       if (
-        now < s.start ||
-        now > s.end
+        now < step.start ||
+        now > step.end
       ) {
         continue;
       }
 
-      animateStep(s, now);
+      if (step.heroId) {
+        activeHeroes.add(step.heroId);
+      }
+
+      animateStep(step, now);
     }
 
-    for (const h of state.heroes) {
-      h.x = num(
-        h.x,
+    for (const hero of state.heroes) {
+      if (!hero.element) continue;
+
+      hero.x = num(
+        hero.x,
         0.06,
         0.94,
         0.5
       );
 
-      h.y = num(
-        h.y,
-        0.10,
-        0.90,
+      hero.y = num(
+        hero.y,
+        0.1,
+        0.9,
         0.5
       );
 
-      h.element.style.left =
-        (h.x * 100) + "%";
+      hero.element.style.left =
+        hero.x * 100 + "%";
 
-      h.element.style.top =
-        (h.y * 100) + "%";
+      hero.element.style.top =
+        hero.y * 100 + "%";
 
-      const sx =
-        (h.face || 1) *
-        h.aiTurn *
-        h.aiScale;
+      if (activeHeroes.has(hero.id)) {
+        const sx =
+          (hero.face || 1) *
+          hero.aiTurn *
+          hero.aiScale;
 
-      h.element.style.transform =
-        `translate(-50%,-50%) ` +
-        `translateX(${h.aiOffset}px) ` +
-        `scale(${sx},${h.aiScale})`;
+        hero.element.style.transform =
+          "translate(-50%,-50%) " +
+          "translateX(" +
+          hero.aiOffset +
+          "px) " +
+          "scale(" +
+          sx +
+          "," +
+          hero.aiScale +
+          ")";
 
-      h.element.style.opacity =
-        String(h.aiOpacity);
+        hero.element.style.opacity =
+          String(hero.aiOpacity);
+      }
     }
 
-    D.timeline =
-      D.timeline.filter(
-        s => now < s.end + 1000
-      );
+    D.timeline = D.timeline.filter(
+      step => now < step.end + 1000
+    );
   };
+
+  /* ===== 接管場景特效 ===== */
 
   drawScenes = function (p, t) {
     old.drawScenes(p, t);
 
     const now = performance.now();
 
-    for (const o of D.objects.values()) {
-      drawObject(p, o, t);
+    for (const object of D.objects.values()) {
+      drawClayObject(p, object, t);
     }
 
-    for (const s of D.timeline) {
+    for (const step of D.timeline) {
       if (
-        s.op === "emit" &&
-        now >= s.start &&
-        now <= s.end
+        step.op === "emit" &&
+        now >= step.start &&
+        now <= step.end
       ) {
-        drawEmissions(p, s, now);
+        drawEmissions(p, step, now);
       }
     }
   };
 
+  /* ===== AI 技能記憶 ===== */
+
+  function saveSkills() {
+    try {
+      const data = state.heroes.map(hero => ({
+        id: hero.id,
+        name: hero.name,
+        skills: arr(hero.aiSkills)
+      }));
+
+      localStorage.setItem(
+        D.storageKey,
+        JSON.stringify(data)
+      );
+    } catch (error) {
+      console.warn(
+        "無法儲存技能",
+        error
+      );
+    }
+  }
+
+  function loadSkills() {
+    try {
+      const raw = JSON.parse(
+        localStorage.getItem(D.storageKey) ||
+        "[]"
+      );
+
+      return arr(raw);
+    } catch (error) {
+      return [];
+    }
+  }
+
+  function restoreSkills(hero) {
+    const record = loadSkills().find(
+      item =>
+        item.id === hero.id ||
+        (
+          !item.id &&
+          item.name === hero.name
+        )
+    );
+
+    if (!record) return;
+
+    hero.aiSkills = arr(record.skills);
+  }
+
   function rememberSkills(skills) {
-    for (const s of arr(skills)) {
-      const h = byId(s.heroId);
+    for (const raw of arr(skills)) {
+      const hero = getHero(raw.heroId);
 
-      if (!h) continue;
+      if (!hero) continue;
 
-      const name = str(s.name, 50);
+      const name = str(raw.name, 50);
 
       if (!name) continue;
 
       const skill = {
         name,
-        description: str(
-          s.description,
-          200
-        ),
-        timeline: arr(s.timeline)
+        description:
+          str(raw.description, 250),
+
+        timeline: arr(raw.timeline)
           .slice(0, 20)
           .map(normalizeStep)
           .filter(Boolean)
       };
 
-      h.aiSkills = arr(
-        h.aiSkills
+      hero.aiSkills = arr(
+        hero.aiSkills
       ).filter(
-        x => x.name !== name
+        item => item.name !== name
       );
 
-      h.aiSkills.push(skill);
+      hero.aiSkills.push(skill);
     }
 
-    store();
+    saveSkills();
     refreshHeroes();
   }
 
   function playSkill() {
-    const h = heroNow();
+    const hero = heroNow();
 
-    if (!h) {
-      return showMessage(
-        "請先選擇角色"
-      );
+    if (!hero) {
+      status("請先選擇黏土主角");
+      return;
     }
 
-    const skills = arr(h.aiSkills);
+    const skills = arr(hero.aiSkills);
 
     if (!skills.length) {
-      return showMessage(
-        "請先請 AI 教角色一項技能"
+      status(
+        "還沒有 AI 技能，可以請孩子先發明一個"
       );
+      return;
     }
 
-    const i =
-      h.aiSkillIndex || 0;
+    const index =
+      hero.aiSkillIndex || 0;
 
     const skill =
-      skills[i % skills.length];
+      skills[index % skills.length];
 
-    h.aiSkillIndex = i + 1;
+    hero.aiSkillIndex =
+      index + 1;
 
-    addTimeline(
-      skill.timeline.map(s => ({
-        ...s,
+    const steps = skill.timeline.map(
+      step => ({
+        ...step,
         heroId:
-          s.heroId || h.id
-      }))
+          step.heroId || hero.id
+      })
     );
+
+    if (!steps.length) {
+      status(
+        "這項技能沒有可播放的動畫步驟"
+      );
+      return;
+    }
+
+    addTimeline(steps);
 
     bubble(
       "⚡ " +
-      h.name +
-      "：" +
+      hero.name +
+      " 使用了「" +
+      skill.name +
+      "」！"
+    );
+
+    status(
+      "✨ 正在播放技能：" +
       skill.name
     );
   }
 
-  function stopAudio() {
-    if (D.audio) {
-      D.audio.pause();
-      D.audio.src = "";
-      D.audio = null;
-    }
-
-    if ("speechSynthesis" in window) {
-      speechSynthesis.cancel();
-    }
-
-    old.stopSpeech();
-  }
-
-  async function speakFull(text) {
-    if (!state.voiceEnabled) return;
-
-    stopAudio();
-
-    try {
-      const r = await callAI(
-        "speakNatural",
-        {
-          text: str(text, 550)
-        }
-      );
-
-      if (!r.audio) {
-        throw Error("無音訊");
-      }
-
-      const audio = new Audio(
-        "data:audio/mpeg;base64," +
-        r.audio
-      );
-
-      D.audio = audio;
-
-      await new Promise(
-        (resolve, reject) => {
-          audio.onended = resolve;
-          audio.onerror = reject;
-
-          audio.play().catch(reject);
-        }
-      );
-
-    } catch (e) {
-      await new Promise(resolve => {
-        if (
-          !("speechSynthesis" in window)
-        ) {
-          return resolve();
-        }
-
-        const u =
-          new SpeechSynthesisUtterance(
-            text
-          );
-
-        u.lang = "zh-TW";
-        u.onend = resolve;
-        u.onerror = resolve;
-
-        speechSynthesis.speak(u);
-      });
-    }
-  }
+  /* ===== AI 對話 ===== */
 
   async function command(message) {
-    message = str(
-      message,
-      1500
-    ).trim();
+    const text =
+      str(message, 1500).trim();
 
-    if (
-      !message ||
-      D.busy ||
-      !state.heroes.length
-    ) {
+    if (!text || D.busy) {
+      return;
+    }
+
+    if (!state.heroes.length) {
+      status(
+        "請先拍照並建立黏土主角"
+      );
       return;
     }
 
@@ -857,46 +883,46 @@
 
     chat(
       "🧒 孩子",
-      message
+      text
     );
 
-    showMessage(
-      "🧠 AI 正在設計故事與動畫…"
+    status(
+      "🧠 AI 正在理解想像並設計動畫……"
     );
+
+    let reply = "";
 
     try {
-      const r = await callAI(
+      const result = await callAI(
         "mindspaceDirector",
         {
-          message,
+          message: text,
 
           selectedHeroId:
             state.selectedId,
 
-          heroes:
-            state.heroes.map(h => ({
-              id: h.id,
-              name: h.name,
-              appearance: h.appearance,
-              personality: h.personality,
+          heroes: state.heroes.map(hero => ({
+            id: hero.id,
+            name: hero.name,
+            appearance: hero.appearance,
+            personality: hero.personality,
 
-              skills:
-                arr(h.aiSkills).map(s => ({
-                  name: s.name,
-                  description:
-                    s.description
-                }))
-            })),
+            skills: arr(
+              hero.aiSkills
+            ).map(skill => ({
+              name: skill.name,
+              description: skill.description
+            }))
+          })),
 
-          objects:
-            [...D.objects.values()]
-              .map(o => ({
-                id: o.id,
-                label: o.label,
-                description:
-                  o.description
-              }))
-              .slice(-20),
+          objects: [
+            ...D.objects.values()
+          ].slice(-20).map(object => ({
+            id: object.id,
+            label: object.label,
+            description:
+              object.description
+          })),
 
           history:
             state.history.slice(-12)
@@ -904,71 +930,73 @@
         120000
       );
 
-      // AI 命名
-      for (
-        const rename of arr(r.renames)
-      ) {
-        const h = byId(
-          rename.heroId
+      /* 主角命名 */
+
+      for (const item of arr(result.renames)) {
+        const hero = getHero(
+          item.heroId
         );
 
-        if (
-          h &&
-          rename.name
-        ) {
-          h.name = str(
-            rename.name,
-            30
-          );
+        if (!hero || !item.name) {
+          continue;
+        }
 
-          attachSkills(h);
+        hero.name =
+          str(item.name, 30);
+
+        if (hero.nameElement) {
+          hero.nameElement.textContent =
+            hero.name;
         }
       }
 
-      // 儲存 AI 生成的技能
-      rememberSkills(r.skills);
+      /* AI 技能 */
 
-      // 執行 AI 動畫
-      addTimeline(r.timeline);
+      rememberSkills(result.skills);
 
-      // AI 生成造型
-      for (
-        const tr of arr(r.transforms)
-      ) {
-        const h = byId(
-          tr.heroId
+      /* 實際動畫 */
+
+      addTimeline(result.timeline);
+
+      /* 黏土外型變身 */
+
+      for (const change of arr(
+        result.transforms
+      ).slice(0, 2)) {
+        const hero = getHero(
+          change.heroId
         );
 
         if (
-          !h ||
-          !tr.description
+          !hero ||
+          !change.description
         ) {
           continue;
         }
 
         try {
           await transformHero(
-            h,
-            str(
-              tr.description,
-              350
-            )
+            hero,
+            str(change.description, 350)
           );
-        } catch (e) {
-          showMessage(
-            "⚠️ 外型生成失敗：" +
-            e.message
+
+        } catch (error) {
+          status(
+            "⚠️ 黏土造型生成失敗：" +
+            error.message
           );
         }
       }
 
+      /* AI 回答 */
+
       const speaker =
-        byId(r.speakerId) ||
+        getHero(result.speakerId) ||
         heroNow() ||
         state.heroes[0];
 
-      const reply = str(
-        r.reply ||
+      reply = str(
+        result.reply ||
         "哇！我們一起看看會發生什麼吧！",
         450
       );
@@ -989,7 +1017,7 @@
       state.history.push(
         {
           role: "user",
-          content: message
+          content: text
         },
         {
           role: "assistant",
@@ -1001,185 +1029,188 @@
         state.history.slice(-24);
 
       refreshHeroes();
-      store();
+      saveSkills();
 
-      showMessage(
-        "🌈 動畫已開始演出"
+      status(
+        "🌈 AI 故事與動畫已更新"
       );
 
-      D.busy = false;
-      state.busy = false;
-
-      $("sendButton").disabled = false;
-
-      await speakFull(reply);
-
-      if (D.auto) {
-        await wait(400);
-
-        if (D.auto) {
-          await record(true);
-        }
-      }
-
-    } catch (e) {
-      showMessage(
-        "❌ " + e.message
+    } catch (error) {
+      status(
+        "❌ AI 導演：" +
+        error.message
       );
 
       chat(
         "⚠️ 系統",
-        e.message,
+        error.message,
         true
       );
 
-      D.auto = false;
+      D.autoTalk = false;
 
     } finally {
       D.busy = false;
       state.busy = false;
-
       $("sendButton").disabled = false;
+    }
+
+    if (reply) {
+      await speak(reply);
+
+      if (D.autoTalk) {
+        await wait(500);
+
+        if (D.autoTalk) {
+          await record(true);
+        }
+      }
     }
   }
 
-  function toBase64(blob) {
-    return blobBase64(blob);
-  }
+  /* ===== AI 自動語音對話 ===== */
 
   async function record(auto = false) {
-    if (
-      D.recording ||
-      D.busy
-    ) {
+    if (D.recording || D.busy) {
       return;
     }
 
+    if (!state.bridgeReady) {
+      throw Error(
+        "AI 尚未連線，請先測試連線"
+      );
+    }
+
     if (
-      !navigator.mediaDevices
-        ?.getUserMedia ||
+      !navigator.mediaDevices?.getUserMedia ||
       !window.MediaRecorder
     ) {
       throw Error(
-        "瀏覽器不支援錄音"
+        "瀏覽器不支援麥克風錄音"
       );
     }
 
     const stream =
-      await navigator.mediaDevices
-        .getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true
-          }
-        });
-
-    D.stream = stream;
-
-    const chunks = [];
+      await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true
+        }
+      });
 
     const mime = [
       "audio/webm;codecs=opus",
       "audio/mp4",
       "audio/webm"
-    ].find(
-      x => MediaRecorder.isTypeSupported(x)
+    ].find(type =>
+      MediaRecorder.isTypeSupported(type)
     );
 
-    const rec =
-      new MediaRecorder(
-        stream,
-        mime ? { mimeType: mime } : {}
-      );
+    const recorder = new MediaRecorder(
+      stream,
+      mime ? { mimeType: mime } : {}
+    );
 
-    D.rec = rec;
+    D.stream = stream;
+    D.recorder = recorder;
     D.recording = true;
 
-    $("micButton").textContent =
-      "⏹️ 結束錄音";
+    const chunks = [];
 
-    rec.ondataavailable = e => {
-      if (e.data.size) {
-        chunks.push(e.data);
+    recorder.ondataavailable = event => {
+      if (event.data.size) {
+        chunks.push(event.data);
       }
     };
 
-    rec.onstop = async () => {
-      clearTimeout(
-        D.micTimer
-      );
+    recorder.onstop = async () => {
+      clearTimeout(D.timer);
 
       D.recording = false;
 
       stream
         .getTracks()
-        .forEach(x => x.stop());
+        .forEach(track => track.stop());
 
       $("micButton").textContent =
         "🎙️ 開始說話";
 
       if (
         !chunks.length ||
-        (auto && !D.auto)
+        (auto && !D.autoTalk)
       ) {
         return;
       }
 
       try {
-        showMessage(
-          "🧠 正在辨識語音…"
+        status(
+          "🧠 AI 正在辨識孩子的語音……"
         );
 
-        const wav = await wav16k(
-          new Blob(
-            chunks,
-            { type: rec.mimeType }
-          )
-        );
-
-        const r = await callAI(
-          "transcribe",
+        const blob = new Blob(
+          chunks,
           {
-            audio:
-              await toBase64(wav)
-          },
-          120000
+            type:
+              recorder.mimeType ||
+              "audio/webm"
+          }
         );
 
-        if (r.text?.trim()) {
-          await command(
-            r.text.trim()
-          );
-        } else {
-          showMessage(
-            "沒有辨識到說話"
+        const wav =
+          await wav16k(blob);
+
+        const audio =
+          await blobBase64(wav);
+
+        if (audio.length > 7000000) {
+          throw Error(
+            "錄音過長，請縮短說話時間"
           );
         }
 
-      } catch (e) {
-        showMessage(
-          "❌ 語音辨識失敗：" +
-          e.message
+        const result = await callAI(
+          "transcribe",
+          { audio },
+          120000
+        );
+
+        const text =
+          str(result.text, 1500).trim();
+
+        if (text) {
+          await command(text);
+        } else {
+          status(
+            "沒有辨識到說話內容"
+          );
+        }
+
+      } catch (error) {
+        status(
+          "❌ 語音辨識：" +
+          error.message
         );
       }
     };
 
-    rec.start();
+    recorder.start();
 
-    showMessage(
+    $("micButton").textContent =
+      "⏹️ 結束錄音";
+
+    status(
       auto
-        ? "🎤 請說話，約 9 秒後自動送出"
-        : "🎤 說完請按結束錄音"
+        ? "🎤 自動聆聽中，約 9 秒後送出"
+        : "🎤 正在錄音，說完請按結束"
     );
 
     if (auto) {
-      D.micTimer = setTimeout(
+      D.timer = setTimeout(
         () => {
           if (
-            D.rec?.state ===
-            "recording"
+            recorder.state === "recording"
           ) {
-            D.rec.stop();
+            recorder.stop();
           }
         },
         9000
@@ -1187,157 +1218,107 @@
     }
   }
 
-  function replaceButton(
-    id,
-    handler
-  ) {
-    const b = $(id);
+  /* ===== 防止重複按鈕事件 ===== */
 
-    if (!b) return;
+  function takeOverClick(id, handler) {
+    const button = $(id);
 
-    const copy =
-      b.cloneNode(true);
-
-    b.replaceWith(copy);
-
-    copy.addEventListener(
-      "click",
-      () =>
-        Promise.resolve()
-          .then(handler)
-          .catch(e =>
-            showMessage(
-              "❌ " + e.message
-            )
-          )
-    );
-  }
-
-  function addTeacherBackground() {
-    const select =
-      $("worldSelect");
-
-    if (!select) return;
-
-    const box =
-      document.createElement("div");
-
-    box.style.cssText =
-      "padding:10px;" +
-      "margin:8px 0;" +
-      "border:1px solid #e7d9ed;" +
-      "border-radius:12px";
-
-    box.innerHTML =
-      '<strong>👩‍🏫 教師自訂背景</strong>' +
-      '<input id="teacherBg" ' +
-      'type="file" accept="image/*" ' +
-      'style="width:100%;margin-top:8px">' +
-      '<button id="clearTeacherBg" ' +
-      'style="margin-top:6px">' +
-      '恢復內建背景</button>';
-
-    select.parentElement
-      .appendChild(box);
-
-    $("teacherBg").onchange =
-      async e => {
-        const f =
-          e.target.files?.[0];
-
-        if (!f) return;
-
-        const src = await scaledData(
-          await fileData(f),
-          1400,
-          "image/jpeg"
-        );
-
-        $("world").style.backgroundImage =
-          `url("${src}")`;
-
-        $("world").style.backgroundSize =
-          "cover";
-      };
-
-    $("clearTeacherBg").onclick =
-      () => {
-        $("world").style.backgroundImage =
-          "";
-
-        select.dispatchEvent(
-          new Event("change")
-        );
-      };
-  }
-
-  saveHero = function () {
-    const ids = new Set(
-      state.heroes.map(
-        h => h.id
-      )
-    );
-
-    const previousWelcome =
-      welcomeHero;
-
-    welcomeHero = function () {};
-
-    try {
-      old.saveHero();
-    } finally {
-      welcomeHero =
-        previousWelcome;
+    if (!button) {
+      console.warn(
+        APP,
+        "找不到按鈕",
+        id
+      );
+      return;
     }
 
-    const h = heroNow();
+    // 使用捕獲階段，攔截 sketch.js 的舊事件。
+    // 不需要複製 DOM，因此不會破壞其他元素參照。
+    button.addEventListener(
+      "click",
+      event => {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+
+        try {
+          Promise.resolve(
+            handler()
+          ).catch(error => {
+            status(
+              "❌ " + error.message
+            );
+          });
+
+        } catch (error) {
+          status(
+            "❌ " + error.message
+          );
+        }
+      },
+      true
+    );
+  }
+
+  /* ===== 接管建立主角 ===== */
+
+  saveHero = function () {
+    const before = new Set(
+      state.heroes.map(hero => hero.id)
+    );
+
+    // 保留原本的拍照、去背與建立主角流程
+    old.saveHero();
+
+    const hero = heroNow();
 
     if (
-      h &&
-      !ids.has(h.id)
+      hero &&
+      !before.has(hero.id)
     ) {
-      attachSkills(h);
+      restoreSkills(hero);
 
-      const msg =
+      const message =
         "哇！我誕生了！" +
         "你想幫我取什麼名字？" +
-        "我又有什麼特別能力呢？";
+        "我有什麼特別的能力呢？";
+
+      bubble(message);
 
       chat(
         "🌱 新朋友",
-        msg,
+        message,
         true
       );
-
-      bubble(msg);
-
-      speakFull(msg).then(
-        () => {
-          if (D.auto) {
-            record(true);
-          }
-        }
-      );
     }
+
+    refreshHeroes();
   };
 
+  /* ===== 接管按鈕初始化 ===== */
+
   setupButtons = function () {
+    // 先建立 sketch.js 原本的所有功能：
+    // 拍照、去背、背景、連線測試等
     old.setupButtons();
 
-    addTeacherBackground();
-
-    replaceButton(
+    // 只接管 AI 對話相關功能
+    takeOverClick(
       "sendButton",
       () => command(
         $("chatInput").value
       )
     );
 
-    replaceButton(
+    takeOverClick(
       "micButton",
       () => {
         if (D.recording) {
-          D.rec?.stop();
+          if (
+            D.recorder?.state ===
+            "recording"
+          ) {
+            D.recorder.stop();
+          }
           return;
         }
 
@@ -1345,102 +1326,140 @@
       }
     );
 
-    replaceButton(
+    takeOverClick(
       "skillButton",
       playSkill
     );
 
-    replaceButton(
-      "saveEditor",
-      saveHero
-    );
-
-    replaceButton(
-      "stopVoice",
-      () => {
-        D.auto = false;
-
-        if (
-          D.rec?.state ===
-          "recording"
-        ) {
-          D.rec.stop();
-        }
-
-        stopAudio();
-      }
-    );
-
-    const input =
-      $("chatInput");
-
-    const copy =
-      input.cloneNode(true);
-
-    input.replaceWith(copy);
-
-    copy.addEventListener(
+    // 直接攔截舊版 Enter 事件
+    $("chatInput").addEventListener(
       "keydown",
-      e => {
+      event => {
         if (
-          e.key === "Enter" &&
-          !e.shiftKey &&
-          !e.isComposing
+          event.key === "Enter" &&
+          !event.shiftKey &&
+          !event.isComposing
         ) {
-          e.preventDefault();
+          event.preventDefault();
+          event.stopImmediatePropagation();
 
           command(
-            copy.value
+            $("chatInput").value
           );
         }
+      },
+      true
+    );
+
+    // 增加自動對話模式
+    if (!$("aiAutoTalk")) {
+      const button =
+        document.createElement("button");
+
+      button.id = "aiAutoTalk";
+      button.type = "button";
+      button.className = "full pink";
+      button.textContent =
+        "🎤 開啟自動對話";
+
+      $("micButton")
+        .parentElement
+        .insertAdjacentElement(
+          "afterend",
+          button
+        );
+
+      button.addEventListener(
+        "click",
+        async () => {
+          D.autoTalk =
+            !D.autoTalk;
+
+          button.textContent =
+            D.autoTalk
+              ? "🛑 停止自動對話"
+              : "🎤 開啟自動對話";
+
+          if (!D.autoTalk) {
+            if (
+              D.recorder?.state ===
+              "recording"
+            ) {
+              D.recorder.stop();
+            }
+
+            return;
+          }
+
+          try {
+            await record(true);
+
+          } catch (error) {
+            D.autoTalk = false;
+
+            button.textContent =
+              "🎤 開啟自動對話";
+
+            status(
+              "❌ " + error.message
+            );
+          }
+        }
+      );
+    }
+
+    takeOverClick(
+      "stopVoice",
+      () => {
+        D.autoTalk = false;
+
+        if ($("aiAutoTalk")) {
+          $("aiAutoTalk").textContent =
+            "🎤 開啟自動對話";
+        }
+
+        if (
+          D.recorder?.state ===
+          "recording"
+        ) {
+          D.recorder.stop();
+        }
+
+        stopSpeech();
       }
     );
 
-    const b =
-      document.createElement(
-        "button"
-      );
-
-    b.id = "aiAutoTalk";
-    b.textContent =
-      "🎤 開啟自動對話";
-
-    b.className =
-      "full pink";
-
-    $("micButton")
-      .parentElement
-      .appendChild(b);
-
-    b.onclick = async () => {
-      D.auto = !D.auto;
-
-      b.textContent =
-        D.auto
-          ? "🛑 停止自動對話"
-          : "🎤 開啟自動對話";
-
-      if (!D.auto) {
-        if (
-          D.rec?.state ===
-          "recording"
-        ) {
-          D.rec.stop();
-        }
-
-        return;
-      }
-
-      try {
-        await record(true);
-
-      } catch (e) {
-        D.auto = false;
-
-        showMessage(
-          "❌ " + e.message
-        );
-      }
-    };
+    console.log(
+      APP,
+      "已接管 AI 對話與動畫"
+    );
   };
+
+  /* ===== 供除錯使用 ===== */
+
+  window.MindspaceDirector = {
+    get timeline() {
+      return D.timeline;
+    },
+
+    get objects() {
+      return [
+        ...D.objects.values()
+      ];
+    },
+
+    get busy() {
+      return D.busy;
+    },
+
+    command,
+    playSkill,
+    addTimeline,
+
+    clearObjects() {
+      D.objects.clear();
+      D.timeline = [];
+    }
+  };
+
 })();
