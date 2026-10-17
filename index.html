@@ -4,12 +4,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport"
-        content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-
+        content="width=device-width,initial-scale=1,viewport-fit=cover">
   <title>Mindspace｜心智小宇宙</title>
 
-  <!-- p5.js -->
-  <script src="https://cdn.jsdelivr.net/npm/p5@1.11.10/lib/p5.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.11.3/p5.min.js"></script>
 
   <style>
     * {
@@ -18,40 +16,62 @@
 
     body {
       margin: 0;
-      font-family: "Microsoft JhengHei", Arial, sans-serif;
-      background: #d8f2fa;
-      color: #504b69;
+      font-family: "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+      background: #e9e0f6;
+      color: #44394f;
     }
 
-    button, input, textarea, select {
+    button,
+    input,
+    select,
+    textarea {
       font: inherit;
     }
 
     button {
-      border: none;
-      border-radius: 14px;
-      padding: 12px;
-      background: #eadcff;
-      color: #514b69;
-      font-weight: bold;
       cursor: pointer;
+      border: none;
+      border-radius: 13px;
+      padding: 11px 13px;
+      font-weight: 700;
+      color: #51435e;
+      transition: opacity .2s, transform .2s;
+    }
+
+    button:hover {
+      opacity: .88;
+    }
+
+    button:active {
+      transform: scale(.97);
     }
 
     button:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
+      opacity: .5;
+      cursor: wait;
+    }
+
+    .pink { background: #ffe0ec; }
+    .blue { background: #dcefff; }
+    .mint { background: #dff7e7; }
+    .yellow { background: #fff0c8; }
+    .full { width: 100%; }
+
+    .hidden {
+      display: none !important;
     }
 
     .app {
       display: flex;
       width: 100%;
       height: 100dvh;
+      min-height: 500px;
       overflow: hidden;
     }
 
     .world {
-      position: relative;
       flex: 1;
+      position: relative;
       min-width: 0;
       overflow: hidden;
       background: linear-gradient(
@@ -59,84 +79,83 @@
         #aee9f5 75%,
         #73c8cb
       );
+      background-position: center;
+      background-size: cover;
     }
 
-    #scene {
-      position: absolute;
-      inset: 0;
-    }
-
+    #scene,
     #actors {
       position: absolute;
       inset: 0;
+    }
+
+    #scene {
+      pointer-events: none;
+      z-index: 1;
+    }
+
+    #actors {
+      z-index: 2;
       pointer-events: none;
     }
 
     #worldTitle {
       position: absolute;
-      z-index: 5;
+      z-index: 4;
       top: 18px;
-      left: 50%;
-      transform: translateX(-50%);
-      padding: 12px 20px;
-      background: rgba(255,255,255,0.85);
-      border-radius: 24px;
-      font-weight: bold;
-      white-space: nowrap;
+      left: 18px;
+      max-width: 70%;
+      padding: 12px 18px;
+      border-radius: 20px;
+      background: rgba(255,255,255,.88);
+      font-size: 17px;
+      font-weight: 800;
     }
 
     #speechBubble {
       position: absolute;
-      z-index: 6;
-      bottom: 25px;
+      z-index: 5;
       left: 50%;
+      bottom: 30px;
       transform: translateX(-50%);
       width: max-content;
-      max-width: 85%;
-      padding: 15px 20px;
-      background: rgba(255,255,255,0.94);
-      border-radius: 20px;
-      box-shadow: 0 5px 18px #43849a33;
+      max-width: min(85%, 650px);
+      padding: 13px 22px;
+      background: rgba(255,255,255,.95);
+      border-radius: 22px;
       text-align: center;
+      box-shadow: 0 6px 20px #0002;
       line-height: 1.6;
     }
 
     .sidebar {
-      width: 350px;
-      flex-shrink: 0;
-      padding: 14px;
-      background: #fffaff;
+      width: 360px;
+      max-width: 42vw;
+      height: 100%;
       overflow-y: auto;
+      background: #fffaff;
+      padding: 20px;
+      box-shadow: -5px 0 20px #0001;
+      z-index: 10;
     }
 
-    .brand {
-      text-align: center;
-      padding: 18px;
-      margin-bottom: 14px;
-      border-radius: 20px;
-      background: linear-gradient(
-        120deg,
-        #ffe1ef,
-        #def3ff
-      );
+    .sidebar h1 {
+      margin: 0;
+      font-size: 25px;
+      color: #8567a6;
     }
 
-    .brand h1 {
-      margin: 5px;
-      font-size: 27px;
-    }
-
-    .brand p {
-      margin: 5px;
+    .subtitle {
+      margin: 5px 0 20px;
+      color: #8b8196;
       font-size: 13px;
     }
 
     .section {
-      padding: 14px;
-      margin-bottom: 13px;
-      border: 2px solid #f1e8f5;
-      border-radius: 18px;
-      background: white;
+      background: #f8f3ff;
+      border-radius: 20px;
+      padding: 15px;
+      margin-bottom: 15px;
     }
 
     .section h2 {
@@ -146,38 +165,35 @@
 
     .grid {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: repeat(2, minmax(0,1fr));
       gap: 8px;
     }
 
-    .full {
-      width: 100%;
-      margin-top: 8px;
+    .section button {
+      margin-bottom: 5px;
     }
 
-    textarea, select, input[type="text"] {
+    .hint {
+      color: #8d8297;
+      font-size: 12px;
+      line-height: 1.7;
+    }
+
+    textarea,
+    select,
+    input[type="text"] {
       width: 100%;
-      padding: 11px;
-      border: 2px solid #eee5f3;
+      border: 1px solid #e3d8ed;
       border-radius: 12px;
+      padding: 11px;
       background: white;
-      color: #514b69;
+      outline-color: #a88ac7;
     }
 
     textarea {
-      min-height: 85px;
       resize: vertical;
-    }
-
-    .pink { background: #ffe0ec; }
-    .blue { background: #dcefff; }
-    .mint { background: #dff7e7; }
-    .yellow { background: #fff0c8; }
-
-    .hint {
-      font-size: 12px;
-      color: #8c859b;
-      line-height: 1.7;
+      min-height: 76px;
+      margin-bottom: 8px;
     }
 
     #heroList {
@@ -185,61 +201,94 @@
     }
 
     #chatLog {
-      height: 160px;
-      padding: 10px;
+      height: 185px;
       overflow-y: auto;
-      background: #f8f3ff;
-      border-radius: 12px;
+      padding: 8px;
+      background: white;
+      border-radius: 14px;
+      margin: 10px 0;
       font-size: 13px;
-      line-height: 1.6;
+    }
+
+    #appearance {
+      overflow-wrap: anywhere;
     }
 
     #status {
       padding: 12px;
-      background: #f4efff;
       border-radius: 12px;
-      font-size: 12px;
+      background: white;
+      line-height: 1.7;
+      font-size: 13px;
       overflow-wrap: anywhere;
+    }
+
+    .teacher-background {
+      background: white;
+      border: 1px solid #eadff0;
+      border-radius: 13px;
+      padding: 12px;
+      margin: 12px 0;
+    }
+
+    .teacher-background label {
+      display: block;
+      font-weight: bold;
+      margin-bottom: 8px;
+    }
+
+    .teacher-background input {
+      width: 100%;
+      margin-bottom: 10px;
     }
 
     .modal {
       position: fixed;
-      z-index: 50;
       inset: 0;
+      z-index: 100;
+      background: rgba(30,30,50,.7);
       display: flex;
       align-items: center;
       justify-content: center;
-      padding: 12px;
-      background: rgba(34,47,75,0.65);
-    }
-
-    .hidden {
-      display: none !important;
+      padding: 15px;
     }
 
     .dialog {
-      width: min(760px, 98vw);
-      max-height: 95dvh;
-      overflow-y: auto;
-      padding: 18px;
       background: #fffaff;
-      border-radius: 22px;
+      border-radius: 24px;
+      padding: 22px;
+      width: min(700px, 96vw);
+      max-height: 94dvh;
+      overflow-y: auto;
+    }
+
+    .dialog h2 {
+      margin-top: 0;
     }
 
     #cameraVideo {
-      display: block;
       width: 100%;
-      max-height: 55dvh;
-      background: #e7eef4;
-      border-radius: 14px;
+      max-height: 55vh;
+      background: #111;
+      border-radius: 15px;
+      object-fit: contain;
     }
 
     #editCanvas {
       display: block;
       width: 100%;
-      max-height: 55dvh;
-      background: #edf1f5;
-      border-radius: 14px;
+      max-height: 55vh;
+      object-fit: contain;
+      background-color: white;
+      background-image:
+        linear-gradient(45deg,#eee 25%,transparent 25%),
+        linear-gradient(-45deg,#eee 25%,transparent 25%),
+        linear-gradient(45deg,transparent 75%,#eee 75%),
+        linear-gradient(-45deg,transparent 75%,#eee 75%);
+      background-size: 20px 20px;
+      background-position:
+        0 0,0 10px,10px -10px,-10px 0;
+      border-radius: 12px;
       touch-action: none;
     }
 
@@ -250,46 +299,55 @@
       margin-top: 12px;
     }
 
+    .actions button {
+      flex: 1 1 auto;
+    }
+
+    #brushSize {
+      width: 100%;
+    }
+
     #startScreen {
       position: fixed;
-      z-index: 100;
       inset: 0;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 20px;
+      z-index: 200;
       background: linear-gradient(
-        140deg,
-        #a5e4f5,
-        #f8dcec
+        145deg,
+        #bcefff,
+        #ead9ff,
+        #ffe6f0
       );
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 20px;
     }
 
     .startCard {
-      width: min(470px, 95vw);
-      padding: 35px;
+      max-width: 550px;
+      padding: 40px;
+      border-radius: 32px;
+      background: rgba(255,255,255,.9);
       text-align: center;
-      background: rgba(255,255,255,0.95);
-      border-radius: 30px;
-      box-shadow: 0 10px 35px #638da344;
+      box-shadow: 0 15px 45px #0002;
     }
 
     .startCard h1 {
-      font-size: 34px;
+      font-size: 45px;
+      color: #9373ba;
+      margin: 10px 0;
     }
 
-    #startButton {
-      padding: 17px 35px;
-      font-size: 20px;
+    .startCard button {
       background: #ffd0e4;
+      font-size: 20px;
+      padding: 16px 35px;
     }
 
     #bridgeFrame {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      opacity: 0;
-      pointer-events: none;
+      display: none;
+      width: 0;
+      height: 0;
       border: 0;
     }
 
@@ -297,49 +355,49 @@
       display: none;
     }
 
+    #fullscreenButton {
+      position: fixed;
+      z-index: 20;
+      top: 15px;
+      right: 375px;
+      background: white;
+      box-shadow: 0 3px 12px #0002;
+    }
+
     @media (max-width: 850px) {
-      .app {
-        flex-direction: column;
-      }
-
-      .world {
-        min-height: 0;
-      }
-
       .sidebar {
-        width: 100%;
-        flex: 0 0 min(45dvh, 380px);
-        border-top: 3px solid #e9ddf3;
+        width: min(370px,90vw);
+        max-width: none;
+        position: fixed;
+        right: 0;
+        top: 0;
+        bottom: 0;
+        transition: transform .25s;
       }
 
       .sidebar.collapsed {
-        flex-basis: 0;
-        padding: 0;
-        overflow: hidden;
+        transform: translateX(100%);
       }
 
       #mobileToggle {
         display: block;
         position: fixed;
-        z-index: 20;
-        right: 15px;
-        bottom: 15px;
-        width: 50px;
-        height: 50px;
-        border-radius: 50%;
-        background: #ffe1ed;
+        z-index: 30;
+        right: 12px;
+        bottom: 12px;
+        background: #ffe0ec;
       }
 
-      .brand {
-        padding: 10px;
+      #fullscreenButton {
+        right: 12px;
       }
 
-      .brand h1 {
-        font-size: 21px;
+      #worldTitle {
+        font-size: 14px;
       }
 
-      .section {
-        padding: 10px;
+      #speechBubble {
+        bottom: 65px;
       }
     }
   </style>
@@ -347,39 +405,31 @@
 
 <body>
 
-  <!-- 初始畫面 -->
+  <!-- 歡迎畫面 -->
   <div id="startScreen">
     <div class="startCard">
-      <div style="font-size:55px;">
-        🐠 🫧 🌈
-      </div>
-
+      <div style="font-size:55px">🐠 🫧 🌈</div>
       <h1>Mindspace</h1>
       <h2>心智小宇宙</h2>
-
       <p>
         讓你親手創造的黏土朋友，
         進入一個會說話、會變身的想像世界！
       </p>
-
       <button id="startButton">
         ✨ 開始冒險
       </button>
-
       <p class="hint">
-        支援 Windows 與 iPad，
-        可使用攝影機及麥克風。
+        支援電腦與 iPad，可使用攝影機及麥克風。
       </p>
     </div>
   </div>
 
-  <div class="app">
+  <!-- 主程式 -->
+  <div class="app" id="app">
 
-    <!-- 世界 -->
+    <!-- 互動世界 -->
     <main class="world" id="world">
-
       <div id="scene"></div>
-
       <div id="actors"></div>
 
       <div id="worldTitle">
@@ -389,35 +439,27 @@
       <div id="speechBubble">
         ✨ 先創造你的第一個黏土朋友吧！
       </div>
-
     </main>
 
-    <!-- 側邊控制區 -->
+    <!-- 側邊控制面板 -->
     <aside class="sidebar" id="sidebar">
 
-      <header class="brand">
-        <div>🌈 🫧 🐠</div>
+      <h1>🌈 Mindspace</h1>
+      <p class="subtitle">
+        創造 × 想像 × AI 互動探索
+      </p>
 
-        <h1>Mindspace</h1>
-
-        <p>心智小宇宙</p>
-
-        <p>給予方法，但不給予答案</p>
-      </header>
-
-      <!-- 黏土創作 -->
+      <!-- 主角 -->
       <section class="section">
-
-        <h2>📸 創造黏土主角</h2>
+        <h2>🧸 我的黏土朋友</h2>
 
         <div id="heroList">
-          🌱 還沒有黏土主角
+          還沒有黏土主角
         </div>
 
         <div class="grid">
-
           <button id="openCamera" class="pink">
-            📷 開啟攝影機
+            📸 拍照
           </button>
 
           <button id="uploadPhoto" class="yellow">
@@ -425,45 +467,43 @@
           </button>
 
           <button id="editHero" class="blue">
-            🪄 修改去背
+            🪄 修改主角
           </button>
 
           <button id="deleteHero" class="mint">
             🗑️ 移除主角
           </button>
-
         </div>
 
         <button id="inspectHero" class="full blue">
-          🧠 AI 觀察黏土造型
+          🧠 AI 觀察黏土外型
         </button>
 
         <p id="appearance" class="hint"></p>
-
       </section>
 
       <!-- AI 對話 -->
       <section class="section">
-
         <h2>🎤 和黏土朋友說話</h2>
 
-        <select id="selectedHero"></select>
+        <select id="selectedHero">
+          <option value="">請先建立主角</option>
+        </select>
 
         <div id="chatLog"></div>
 
         <textarea
           id="chatInput"
-          placeholder="例如：我想要你長出紫色翅膀，飛起來發射雷射！"
+          placeholder="例如：小魚想認識一隻有三個眼睛、會噴彩虹的水母"
         ></textarea>
 
         <div class="grid">
-
           <button id="micButton" class="pink">
             🎙️ 開始說話
           </button>
 
           <button id="sendButton" class="blue">
-            💬 傳給 AI
+            💬 送出故事
           </button>
 
           <button id="voiceButton" class="mint">
@@ -471,25 +511,25 @@
           </button>
 
           <button id="stopVoice" class="yellow">
-            ⏹️ 停止聲音
+            ⏹️ 停止語音
           </button>
-
         </div>
 
+        <p class="hint">
+          AI 將理解孩子的描述，讓角色進行互動。
+        </p>
       </section>
 
-      <!-- AI 造型 -->
+      <!-- 角色變身 -->
       <section class="section">
-
-        <h2>🎨 AI 黏土造型與技能</h2>
+        <h2>✨ AI 造型與技能</h2>
 
         <textarea
           id="transformInput"
-          placeholder="例如：增加一對紫色黏土翅膀，保留原本身體形狀"
+          placeholder="例如：幫我的黏土魚長出透明翅膀，保留原本的身體"
         ></textarea>
 
         <div class="grid">
-
           <button id="transformButton" class="pink">
             ✨ AI 黏土變身
           </button>
@@ -505,80 +545,89 @@
           <button id="skillButton" class="yellow">
             ⚡ 表演技能
           </button>
-
         </div>
-
-        <p class="hint">
-          AI 可以增加黏土風格造型，
-          原始黏土圖片會另外保留。
-        </p>
-
       </section>
 
-      <!-- 世界設定 -->
+      <!-- 世界與背景 -->
       <section class="section">
-
         <h2>🌍 探索世界</h2>
 
         <select id="worldSelect">
-
           <option value="ocean">
             🌊 海底世界
           </option>
-
           <option value="forest">
             🌳 森林世界
           </option>
-
           <option value="space">
             🚀 太空世界
           </option>
-
         </select>
+
+        <div class="teacher-background">
+          <label for="teacherBg">
+            🖼️ 更換背景圖片
+          </label>
+
+          <input
+            id="teacherBg"
+            type="file"
+            accept="image/*"
+          >
+
+          <button
+            id="clearTeacherBg"
+            class="full blue"
+          >
+            ↩️ 恢復預設背景
+          </button>
+        </div>
 
         <button id="resetButton" class="full yellow">
           🌱 開始新創作
         </button>
-
       </section>
 
-      <!-- 系統狀態 -->
+      <!-- 連線測試 -->
       <section class="section">
+        <h2>🔌 AI 系統狀態</h2>
 
-        <h2>🔌 系統狀態</h2>
+        <button id="testBridge" class="full mint">
+          🔍 測試 AI 連線
+        </button>
 
         <div id="status">
-          等待啟動……
+          等待系統啟動……
         </div>
-
       </section>
 
     </aside>
-
   </div>
 
-  <!-- iPad 側邊欄 -->
+  <button id="fullscreenButton">
+    ⛶ 全螢幕
+  </button>
+
   <button id="mobileToggle">
     ☰
   </button>
 
-  <!-- GAS 後端橋樑 -->
+  <!-- GAS iframe -->
   <iframe
     id="bridgeFrame"
     title="Mindspace AI Bridge"
   ></iframe>
 
-  <!-- 上傳圖片 -->
+  <!-- 照片上傳 -->
   <input
-    type="file"
     id="photoFile"
+    type="file"
     accept="image/*"
     hidden
   >
 
-  <!-- 攝影機視窗 -->
+  <!-- 攝影機 -->
   <div id="cameraModal" class="modal hidden">
-
     <div class="dialog">
 
       <h2>📸 拍攝黏土主角</h2>
@@ -595,7 +644,6 @@
       </p>
 
       <div class="actions">
-
         <button id="captureButton" class="pink">
           📸 拍照
         </button>
@@ -605,22 +653,19 @@
         </button>
 
         <button id="retryCamera">
-          重試
+          🔄 重試
         </button>
 
         <button id="closeCamera">
           ✖ 關閉
         </button>
-
       </div>
 
     </div>
-
   </div>
 
-  <!-- 去背視窗 -->
+  <!-- 黏土去背編輯器 -->
   <div id="editorModal" class="modal hidden">
-
     <div class="dialog">
 
       <h2>🪄 黏土去背編輯</h2>
@@ -628,14 +673,18 @@
       <canvas id="editCanvas"></canvas>
 
       <p class="hint">
-        可以自動去背，也能用手指或滑鼠擦除、
-        還原圖片。
+        可使用 AI 精細去背、快速去背，
+        或使用筆刷擦除及還原。
       </p>
 
       <div class="actions">
 
+        <button id="removeBgAI" class="blue">
+          🤖 AI 自動去背
+        </button>
+
         <button id="removeBg" class="pink">
-          ✨ 自動去背
+          ✨ 快速去背
         </button>
 
         <button id="eraseMode">
@@ -650,13 +699,17 @@
           ↩️ 撤銷
         </button>
 
+        <button id="resetEdit">
+          🔄 重設
+        </button>
+
       </div>
 
       <p class="hint">筆刷大小</p>
 
       <input
-        type="range"
         id="brushSize"
+        type="range"
         min="5"
         max="90"
         value="28"
@@ -675,13 +728,10 @@
       </div>
 
     </div>
-
   </div>
 
-  <!-- 主程式：必須先載入 sketch.js -->
+  <!-- 載入順序不可顛倒 -->
   <script src="./sketch.js"></script>
-
-  <!-- AI Director：取代舊 mindspace-extra.js -->
   <script src="./ai-director.js"></script>
 
 </body>
