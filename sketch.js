@@ -1549,7 +1549,8 @@ function saveHero() {
       face: 1,
       phase: Math.random() * Math.PI * 2,
       action: null,
-      skillUntil: 0
+      skillUntil: 0,
+      activeSkillEffects: []
     };
 
     state.heroes.push(h);
@@ -1716,7 +1717,7 @@ async function wav16k(blob) {
     view.setUint16(20, 1, true);
     view.setUint16(22, 1, true);
     view.setUint32(24, rate, true);
-    view.setUint32(28, rate * 2, true);
+    view.setUint16(28, rate * 2, true);
     view.setUint16(32, 2, true);
     view.setUint16(34, 16, true);
     writeString(36, "data");
@@ -1887,12 +1888,9 @@ function performAction(action) {
   };
 
   if (type === "laser") {
-    h.skills.push({
-      name: "雷射光",
-      type: "laser",
-      color: "#ff66cc"
-    });
-    h.skillUntil = performance.now() + 4000;
+    const laser = { name: "雷射光", type: "laser", color: "#ff66cc" };
+    if (!h.skills.some(s => s.type === "laser")) h.skills.push(laser);
+    activateHeroSkill(h, laser, 4000);
   }
 }
 
@@ -1983,13 +1981,21 @@ async function sendStory() {
 
       if (!target) continue;
 
-      target.skills.push({
+      const newSkill = {
         name: skill.name || "神奇技能",
         type: skill.type || "glow",
+        description: skill.description || "",
         color: skill.color || "#ff66cc"
-      });
+      };
 
-      target.skillUntil = performance.now() + 4500;
+      // 保留所有學會的能力；新能力不會覆蓋舊能力。
+      if (!target.skills.some(s =>
+        s.name === newSkill.name && s.type === newSkill.type
+      )) {
+        target.skills.push(newSkill);
+      }
+
+      activateHeroSkill(target, newSkill, 4500);
     }
 
     for (const change of result.transforms || []) {
@@ -2129,31 +2135,127 @@ function drawEnvironment(p, t) {
 
 /* ===== 角色技能特效 ===== */
 
-function drawHeroSkill(p, h, t) {
-  if (!h.skillUntil ||
-      h.skillUntil < performance.now()) {
-    return;
+function activateHeroSkill(h, skill, duration = 4500) {
+  if (!h || !skill) return;
+  const now = performance.now();
+  if (!Array.isArray(h.activeSkillEffects)) h.activeSkillEffects = [];
+  const key = String(skill.type || "") + ":" + String(skill.name || "");
+  const existing = h.activeSkillEffects.find(e => e.key === key && e.until > now);
+  if (existing) {
+    existing.until = now + duration;
+  } else {
+    h.activeSkillEffects.push({ key, skill, start: now, until: now + duration });
   }
+  h.skillUntil = Math.max(h.skillUntil || 0, now + duration);
+}
 
+function heroSkillKind(skill) {
+  const text = [skill?.type, skill?.name, skill?.description]
+    .filter(Boolean).join(" ").toLowerCase();
+  if (/laser|雷射|激光|光束/.test(text)) return "laser";
+  if (/bubble|泡泡|氣泡/.test(text)) return "bubble";
+  if (/fire|flame|火焰|噴火|火球/.test(text)) return "fire";
+  if (/lightning|electric|閃電|雷電|電擊/.test(text)) return "lightning";
+  if (/ice|snow|冰|雪|冷凍/.test(text)) return "ice";
+  if (/wind|tornado|風|龍捲/.test(text)) return "wind";
+  if (/heart|love|愛心|愛|治癒/.test(text)) return "heart";
+  if (/star|sparkle|星星|星光/.test(text)) return "star";
+  return "glow";
+}
+
+function drawOneHeroSkill(p, h, t, skill, index) {
   const x = h.x * p.width;
   const y = h.y * p.height;
-
+  const face = h.face >= 0 ? 1 : -1;
+  const kind = heroSkillKind(skill);
+  const seed = index * 1.618;
   p.push();
-  p.noStroke();
-
-  for (let i = 0; i < 16; i++) {
-    const angle = t * 3 + i * Math.PI / 8;
-    const radius = 52 + Math.sin(t * 5 + i) * 13;
-
-    p.fill(255, 215, 125, 180);
-    p.circle(
-      x + Math.cos(angle) * radius,
-      y + Math.sin(angle) * radius,
-      6
-    );
+  if (kind === "laser") {
+    const sx = x + face * 32, sy = y - 17;
+    const ex = sx + face * 205;
+    const pulse = 1 + Math.sin(t * 17 + seed) * 0.15;
+    p.strokeCap(p.ROUND);
+    p.stroke(255, 65, 190, 50); p.strokeWeight(27 * pulse);
+    p.line(sx, sy, ex, sy);
+    p.stroke(255, 120, 220, 190); p.strokeWeight(11 * pulse);
+    p.line(sx, sy, ex, sy);
+    p.stroke(255, 255, 255, 245); p.strokeWeight(3);
+    p.line(sx, sy, ex, sy);
+    p.noStroke(); p.fill(255, 170, 235, 180); p.circle(ex, sy, 23);
+  } else if (kind === "bubble") {
+    for (let i = 0; i < 24; i++) {
+      const age = (t * 0.33 + i / 24 + seed) % 1;
+      const bx = x + face * (24 + age * 105) + Math.sin(t * 2 + i) * 11;
+      const by = y - 5 - age * 145 + Math.sin(i * 2) * 8;
+      const size = 7 + i % 5 * 4;
+      p.noFill(); p.stroke(175, 245, 255, 195 * (1 - age));
+      p.strokeWeight(1.8); p.circle(bx, by, size);
+    }
+  } else if (kind === "fire") {
+    p.noStroke();
+    for (let i = 0; i < 42; i++) {
+      const age = (t * 0.8 + i * 0.137 + seed) % 1;
+      const px = x + face * (26 + age * 160);
+      const py = y + Math.sin(i * 3 + t * 7) * (6 + age * 25);
+      p.fill(255, 240 - age * 165, 40 + age * 30, 210 * (1 - age));
+      p.circle(px, py, Math.max(2, (1 - age) * (15 + i % 12)));
+    }
+  } else if (kind === "lightning") {
+    const frame = Math.floor(t * 13);
+    for (let b = 0; b < 3; b++) {
+      const points = [];
+      for (let i = 0; i <= 12; i++) {
+        const q = i / 12;
+        points.push([x + face * (25 + q * 175),
+          y + (b - 1) * q * 55 + Math.sin(frame * 17 + i * 39 + b * 7) * 17]);
+      }
+      for (const layer of [[13, 70], [5, 195], [2, 255]]) {
+        p.noFill(); p.stroke(135, 215, 255, layer[1]);
+        p.strokeWeight(layer[0]); p.beginShape();
+        for (const point of points) p.vertex(point[0], point[1]);
+        p.endShape();
+      }
+    }
+  } else if (kind === "wind") {
+    p.noFill();
+    for (let i = 0; i < 9; i++) {
+      const age = (t * 0.65 + i / 9 + seed) % 1;
+      const wx = x + face * (35 + age * 165);
+      const wy = y + Math.sin(i * 2.5 + t * 3) * (15 + age * 42);
+      p.stroke(195, 250, 240, 200 * (1 - age));
+      p.strokeWeight(2 + (i % 3));
+      p.arc(wx, wy, 30 + age * 28, 15 + age * 16, -1, 1.6);
+    }
+  } else {
+    const colors = kind === "ice" ? [145, 225, 255]
+      : kind === "heart" ? [255, 125, 185]
+      : kind === "star" ? [255, 235, 130] : [255, 180, 220];
+    p.noStroke();
+    for (let i = 0; i < 22; i++) {
+      const angle = t * 1.6 + i * Math.PI * 2 / 22 + seed;
+      const radius = 52 + Math.sin(t * 4 + i) * 16;
+      const px = x + Math.cos(angle) * radius;
+      const py = y + Math.sin(angle) * radius;
+      p.fill(...colors, 175);
+      if (kind === "heart") {
+        p.textAlign(p.CENTER, p.CENTER); p.textSize(13 + i % 5);
+        p.text("♥", px, py);
+      } else {
+        p.circle(px, py, 4 + i % 5);
+      }
+    }
   }
-
   p.pop();
+}
+
+function drawHeroSkill(p, h, t) {
+  const now = performance.now();
+  if (!Array.isArray(h.activeSkillEffects)) h.activeSkillEffects = [];
+  h.activeSkillEffects = h.activeSkillEffects.filter(e => e.until > now);
+  // 多個技能可以同時啟動、同時顯示，互不覆蓋。
+  for (let i = 0; i < h.activeSkillEffects.length; i++) {
+    drawOneHeroSkill(p, h, t, h.activeSkillEffects[i].skill, i);
+  }
 }
 
 /* ===== 黏土角色動畫 ===== */
@@ -2251,6 +2353,15 @@ function animateHeroes(p, t) {
 
       h.element.style.opacity =
         type === "hide" ? "0.3" : "1";
+
+      // 父元素翻轉時，文字以相反方向翻回正常閱讀方向。
+      if (h.nameElement) {
+        const mirrored = h.face * flip * scale < 0;
+        h.nameElement.style.transform =
+          "translateX(-50%) scaleX(" + (mirrored ? -1 : 1) + ")";
+        h.nameElement.style.direction = "ltr";
+        h.nameElement.style.unicodeBidi = "isolate";
+      }
     }
 
     drawHeroSkill(p, h, t);
@@ -2586,13 +2697,15 @@ function setupButtons() {
       return;
     }
 
-    h.skillUntil = performance.now() + 4000;
-
-    const skill =
-      h.aiSkills?.at(-1) ||
-      h.skills.at(-1);
-
-    bubble("⚡ " + h.name + "：" + skill.name);
+    // 啟動角色已學會的全部技能，讓技能能夠疊加。
+    const allSkills = [...(h.skills || []), ...(h.aiSkills || [])];
+    const unique = new Map();
+    for (const skill of allSkills) {
+      unique.set(String(skill.type || "") + ":" + String(skill.name || ""), skill);
+    }
+    for (const skill of unique.values()) activateHeroSkill(h, skill, 4000);
+    bubble("⚡ " + h.name + "：" +
+      [...unique.values()].map(s => s.name || "魔法").join("＋"));
   });
 
   // 切換世界
