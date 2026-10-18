@@ -3,8 +3,22 @@
 
 /* =========================================================
    MINDSPACE V2 — AI DIRECTOR
-   開放式故事、黏土角色、動作時間軸、技能記憶
-   相容新版 sketch.js 的 original / transformed 資料結構
+   完整整合版
+
+   保留：
+   1. AI 故事與自然語音對話
+   2. 黏土角色變身 transformHero()
+   3. AI 技能記憶
+   4. 多角色動畫、游動與互動
+   5. AI 物件與粒子特效
+   6. 白色物件名牌取消
+   7. 身體部位不生成漂浮物件
+
+   新增：
+   8. 每隻新角色加入時主動歡迎
+   9. 呼叫原本 speak() 播放語音
+   10. 多角色歡迎語音依序播放
+   11. 修改舊角色不會重複歡迎
 ========================================================= */
 
 (function () {
@@ -27,7 +41,12 @@
     stream: null,
     timer: null,
     speaking: false,
-    storageKey: "mindspace_v2_ai_skills"
+    storageKey: "mindspace_v2_ai_skills",
+
+    // 新增角色歡迎系統
+    welcomedHeroIds: new Set(),
+    welcomeSpeechQueue: Promise.resolve(),
+    welcomeSpeaking: false
   };
 
   const getHero = id =>
@@ -61,7 +80,9 @@
   const wait = ms =>
     new Promise(resolve => setTimeout(resolve, ms));
 
-  /* ===== AI 動作資料安全轉換 ===== */
+  /* =====================================================
+     AI 動作資料安全轉換
+  ===================================================== */
 
   const OPERATIONS = new Set([
     "move",
@@ -126,7 +147,9 @@
     };
   }
 
-  /* ===== AI 時間軸 ===== */
+  /* =====================================================
+     AI 時間軸
+  ===================================================== */
 
   function addTimeline(steps) {
     const start = performance.now();
@@ -182,13 +205,31 @@
     };
   }
 
-  /* ===== 黏土質感的數位物件 ===== */
+  /* =====================================================
+     黏土質感數位物件
+
+     修正：
+     翅膀、觸角、尾巴等身體部位
+     不應該成為獨立漂浮物件
+  ===================================================== */
 
   function createObject(step) {
     const owner = getHero(step.heroId);
 
-    const id =
-      step.objectId || uid();
+    const partText = [
+      step.label,
+      step.description
+    ].filter(Boolean).join(" ");
+
+    const isBodyPart =
+      /(?:翅膀|觸角|翅|尾巴|魚鰭|鰭|腳|手臂|眼睛|耳朵|角|wing|antenna|fin|tail)/i
+        .test(partText);
+
+    if (owner && isBodyPart) {
+      return;
+    }
+
+    const id = step.objectId || uid();
 
     const x =
       owner && step.x === 0.5
@@ -214,6 +255,13 @@
     });
   }
 
+  /* =====================================================
+     數位物件繪製
+
+     已取消白色文字名牌
+     不影響 sketch.js 原本角色名字
+  ===================================================== */
+
   function drawClayObject(p, object, t) {
     const x = object.x * p.width;
     const y = object.y * p.height;
@@ -227,7 +275,7 @@
 
     p.rotate(wobble);
 
-    // 黏土的柔和投影
+    // 柔和投影
     p.noStroke();
     p.fill(45, 35, 55, 35);
 
@@ -238,9 +286,7 @@
       size * 0.18
     );
 
-    const shape =
-      object.shape.toLowerCase();
-
+    const shape = object.shape.toLowerCase();
     const c = p.color(object.color);
 
     p.fill(c);
@@ -324,7 +370,6 @@
       );
 
     } else {
-      // 未指定形狀時仍然有基本可見造型
       p.ellipse(
         0,
         0,
@@ -333,9 +378,8 @@
       );
     }
 
-    // 手捏黏土的高光與不規則小斑點
+    // 黏土高光
     p.noStroke();
-
     p.fill(255, 255, 255, 75);
 
     p.ellipse(
@@ -347,7 +391,9 @@
 
     for (let i = 0; i < 12; i++) {
       const a = i * 2.39996;
-      const r = size * (0.08 + (i % 4) * 0.06);
+
+      const r =
+        size * (0.08 + (i % 4) * 0.06);
 
       p.fill(
         255,
@@ -369,35 +415,14 @@
       p.text(object.emoji, 0, 0);
     }
 
-    if (object.label) {
-      p.textAlign(p.CENTER, p.CENTER);
-      p.textSize(13);
-      p.noStroke();
-
-      p.fill(255, 255, 255, 225);
-
-      p.rectMode(p.CENTER);
-      p.rect(
-        0,
-        size * 0.7,
-        Math.max(60, object.label.length * 15),
-        25,
-        12
-      );
-
-      p.fill("#58466a");
-
-      p.text(
-        object.label,
-        0,
-        size * 0.7
-      );
-    }
+    // 不再繪製 object.label 白色名牌
 
     p.pop();
   }
 
-  /* ===== AI 動作演算 ===== */
+  /* =====================================================
+     AI 動作演算
+  ===================================================== */
 
   function animateStep(step, now) {
     if (
@@ -495,7 +520,7 @@
         Math.sin(angle) * 0.12;
     }
 
-    // 左右水平翻身，不是上下顛倒
+    // 左右翻身
     if (step.op === "turn") {
       hero.aiTurn =
         Math.cos(
@@ -551,7 +576,9 @@
     }
   }
 
-  /* ===== 粒子與能力特效 ===== */
+  /* =====================================================
+     粒子與能力特效
+  ===================================================== */
 
   function drawEmissions(p, step, now) {
     const origin =
@@ -613,7 +640,10 @@
     p.pop();
   }
 
-  /* ===== 接管原本角色動畫 ===== */
+  /* =====================================================
+     保留原本角色自主游動
+     疊加 AI 動作
+  ===================================================== */
 
   animateHeroes = function (p, t) {
     const now = performance.now();
@@ -625,7 +655,6 @@
       hero.aiOffset = 0;
     }
 
-    // 保留 sketch.js 原本的自主移動
     old.animateHeroes(p, t);
 
     const activeHeroes = new Set();
@@ -695,7 +724,9 @@
     );
   };
 
-  /* ===== 接管場景特效 ===== */
+  /* =====================================================
+     場景特效
+  ===================================================== */
 
   drawScenes = function (p, t) {
     old.drawScenes(p, t);
@@ -717,7 +748,9 @@
     }
   };
 
-  /* ===== AI 技能記憶 ===== */
+  /* =====================================================
+     AI 技能記憶
+  ===================================================== */
 
   function saveSkills() {
     try {
@@ -731,6 +764,7 @@
         D.storageKey,
         JSON.stringify(data)
       );
+
     } catch (error) {
       console.warn(
         "無法儲存技能",
@@ -747,6 +781,7 @@
       );
 
       return arr(raw);
+
     } catch (error) {
       return [];
     }
@@ -779,6 +814,7 @@
 
       const skill = {
         name,
+
         description:
           str(raw.description, 250),
 
@@ -858,7 +894,10 @@
     );
   }
 
-  /* ===== AI 對話 ===== */
+  /* =====================================================
+     AI 對話
+     保留 transforms 黏土變身
+  ===================================================== */
 
   async function command(message) {
     const text =
@@ -930,7 +969,7 @@
         120000
       );
 
-      /* 主角命名 */
+      /* ===== 主角命名 ===== */
 
       for (const item of arr(result.renames)) {
         const hero = getHero(
@@ -950,15 +989,18 @@
         }
       }
 
-      /* AI 技能 */
+      /* ===== AI 技能 ===== */
 
       rememberSkills(result.skills);
 
-      /* 實際動畫 */
+      /* ===== AI 動畫 ===== */
 
       addTimeline(result.timeline);
 
-      /* 黏土外型變身 */
+      /* =================================================
+         AI 黏土外觀變身
+         保留原本 transformHero()
+      ================================================= */
 
       for (const change of arr(
         result.transforms
@@ -988,7 +1030,7 @@
         }
       }
 
-      /* AI 回答 */
+      /* ===== AI 回答 ===== */
 
       const speaker =
         getHero(result.speakerId) ||
@@ -1068,7 +1110,9 @@
     }
   }
 
-  /* ===== AI 自動語音對話 ===== */
+  /* =====================================================
+     AI 自動語音辨識
+  ===================================================== */
 
   async function record(auto = false) {
     if (D.recording || D.busy) {
@@ -1218,7 +1262,9 @@
     }
   }
 
-  /* ===== 防止重複按鈕事件 ===== */
+  /* =====================================================
+     防止重複按鈕事件
+  ===================================================== */
 
   function takeOverClick(id, handler) {
     const button = $(id);
@@ -1232,8 +1278,6 @@
       return;
     }
 
-    // 使用捕獲階段，攔截 sketch.js 的舊事件。
-    // 不需要複製 DOM，因此不會破壞其他元素參照。
     button.addEventListener(
       "click",
       event => {
@@ -1259,49 +1303,196 @@
     );
   }
 
-  /* ===== 接管建立主角 ===== */
+  /* =====================================================
+     新增：每隻角色主動歡迎
+  ===================================================== */
 
-  saveHero = function () {
+  function createWelcomeMessage(hero, count) {
+    const name =
+      hero.name || "新朋友";
+
+    if (count === 1) {
+      return (
+        "哇！我們的第一位新朋友誕生了！" +
+        "歡迎來到海底世界！" +
+        "你想幫牠取什麼名字呢？"
+      );
+    }
+
+    if (count === 2) {
+      const firstHero = state.heroes.find(
+        item => item.id !== hero.id
+      );
+
+      return (
+        "哇！又有一位新朋友加入了！" +
+        "歡迎" + name + "！" +
+        (
+          firstHero
+            ? "你想讓牠和" +
+              firstHero.name +
+              "一起玩什麼呢？"
+            : "你想讓牠做什麼呢？"
+        )
+      );
+    }
+
+    const messages = [
+      "哇！" + name +
+        "也加入海底世界了！" +
+        "你想讓牠去哪裡探險呢？",
+
+      "太棒了！又多了一位新朋友！" +
+        "你想讓" + name +
+        "擁有什麼神奇能力呢？",
+
+      "歡迎" + name +
+        "！海底世界越來越熱鬧了！" +
+        "你想讓牠和誰一起玩呢？"
+    ];
+
+    return messages[
+      Math.floor(
+        Math.random() * messages.length
+      )
+    ];
+  }
+
+  /* =====================================================
+     新增：歡迎語音排隊播放
+  ===================================================== */
+
+  function queueWelcomeSpeech(message) {
+    D.welcomeSpeechQueue =
+      D.welcomeSpeechQueue
+        .catch(() => {})
+        .then(async () => {
+          D.welcomeSpeaking = true;
+
+          try {
+            // 等待 AI 導演目前的工作完成
+            while (D.busy || D.speaking) {
+              await wait(200);
+            }
+
+            // 使用原本的 AI 語音系統
+            await speak(message);
+
+          } catch (error) {
+            console.warn(
+              "角色歡迎語音播放失敗：",
+              error
+            );
+
+          } finally {
+            D.welcomeSpeaking = false;
+          }
+        });
+
+    return D.welcomeSpeechQueue;
+  }
+
+  /* =====================================================
+     新增：處理新角色加入
+  ===================================================== */
+
+  function welcomeNewHero(hero, count) {
+    if (!hero || !hero.id) {
+      return;
+    }
+
+    if (D.welcomedHeroIds.has(hero.id)) {
+      return;
+    }
+
+    D.welcomedHeroIds.add(hero.id);
+
+    // 保留原本技能記憶
+    restoreSkills(hero);
+
+    const message =
+      createWelcomeMessage(hero, count);
+
+    // 顯示角色歡迎訊息
+    bubble(message);
+
+    chat(
+      "🐠 " + (hero.name || "新朋友"),
+      message,
+      true
+    );
+
+    // 呼叫原本的 speak()
+    queueWelcomeSpeech(message);
+
+    console.log(
+      "[Mindspace] 新角色加入：",
+      hero.name,
+      message
+    );
+  }
+
+  /* =====================================================
+     修改：saveHero()
+
+     1. 保留原本的建立角色程序
+     2. 等待建立完成
+     3. 只歡迎真正新增的角色
+     4. 修改舊照片不會觸發歡迎
+     5. 每隻角色都主動說話
+  ===================================================== */
+
+  saveHero = function (...args) {
     const before = new Set(
       state.heroes.map(hero => hero.id)
     );
 
-    // 保留原本的拍照、去背與建立主角流程
-    old.saveHero();
+    // 呼叫 sketch.js 原本的 saveHero
+    const result = old.saveHero.apply(this, args);
 
-    const hero = heroNow();
+    // 原本 saveHero 若為 async，等待完成
+    Promise.resolve(result)
+      .then(() => {
+        const newHeroes =
+          state.heroes.filter(
+            hero =>
+              !before.has(hero.id) &&
+              !D.welcomedHeroIds.has(hero.id)
+          );
 
-    if (
-      hero &&
-      !before.has(hero.id)
-    ) {
-      restoreSkills(hero);
+        // 依照新增後的角色順序歡迎
+        const total =
+          state.heroes.length;
 
-      const message =
-        "哇！我誕生了！" +
-        "你想幫我取什麼名字？" +
-        "我有什麼特別的能力呢？";
+        const startCount =
+          total - newHeroes.length;
 
-      bubble(message);
+        newHeroes.forEach((hero, index) => {
+          welcomeNewHero(
+            hero,
+            startCount + index + 1
+          );
+        });
 
-      chat(
-        "🌱 新朋友",
-        message,
-        true
-      );
-    }
+        refreshHeroes();
+      })
+      .catch(error => {
+        console.error(
+          "[Mindspace] 新增角色歡迎流程失敗：",
+          error
+        );
+      });
 
-    refreshHeroes();
+    return result;
   };
 
-  /* ===== 接管按鈕初始化 ===== */
+  /* =====================================================
+     按鈕初始化
+  ===================================================== */
 
   setupButtons = function () {
-    // 先建立 sketch.js 原本的所有功能：
-    // 拍照、去背、背景、連線測試等
     old.setupButtons();
 
-    // 只接管 AI 對話相關功能
     takeOverClick(
       "sendButton",
       () => command(
@@ -1319,6 +1510,7 @@
           ) {
             D.recorder.stop();
           }
+
           return;
         }
 
@@ -1331,7 +1523,6 @@
       playSkill
     );
 
-    // 直接攔截舊版 Enter 事件
     $("chatInput").addEventListener(
       "keydown",
       event => {
@@ -1351,7 +1542,7 @@
       true
     );
 
-    // 增加自動對話模式
+    // 自動對話模式
     if (!$("aiAutoTalk")) {
       const button =
         document.createElement("button");
@@ -1431,11 +1622,13 @@
 
     console.log(
       APP,
-      "已接管 AI 對話與動畫"
+      "已接管 AI 對話、動畫與新角色歡迎"
     );
   };
 
-  /* ===== 供除錯使用 ===== */
+  /* =====================================================
+     除錯與控制
+  ===================================================== */
 
   window.MindspaceDirector = {
     get timeline() {
@@ -1450,6 +1643,10 @@
 
     get busy() {
       return D.busy;
+    },
+
+    get welcomeSpeaking() {
+      return D.welcomeSpeaking;
     },
 
     command,
