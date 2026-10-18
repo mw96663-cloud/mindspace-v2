@@ -166,17 +166,17 @@
         background: #e9ddff !important;
       }
 
-      /* ===== 背景遮罩 ===== */
+      /* ===== 背景遮罩：已修正 ===== */
 
       #toolBasketOverlay {
         position: fixed !important;
 
         inset: 0 !important;
 
-        background:
-          rgba(25, 20, 40, 0.15);
+        background: transparent;
 
-        backdrop-filter: blur(2px);
+        backdrop-filter: none;
+        -webkit-backdrop-filter: none;
 
         z-index: 9997 !important;
 
@@ -480,68 +480,4 @@
 
   }
 
-})();
-
-/* Mindspace｜工作區籃子清晰畫面修正
-   保留原有工具按鈕與開關功能
-*/
-(() => {
-  const styleId = "mindspace-clear-workspace";
-
-  function applyClearWorkspace() {
-    if (document.getElementById(styleId)) return;
-
-    const style = document.createElement("style");
-    style.id = styleId;
-    style.textContent = `
-      /* 工作區展開時，主畫面不模糊、不變暗 */
-      body::before,
-      body::after {
-        backdrop-filter: none !important;
-      }
-
-      #workspace-overlay,
-      #basket-overlay,
-      #tool-basket-overlay,
-      .workspace-overlay,
-      .basket-overlay,
-      .tool-basket-overlay,
-      .drawer-overlay {
-        backdrop-filter: none !important;
-        -webkit-backdrop-filter: none !important;
-        background: transparent !important;
-        box-shadow: none !important;
-      }
-
-      /* 避免開啟抽屜時，模糊套用到海底世界 */
-      #main,
-      #main-content,
-      #game-container,
-      #canvas-container,
-      #sketch-container,
-      main,
-      canvas {
-        filter: none !important;
-        -webkit-filter: none !important;
-        backdrop-filter: none !important;
-        -webkit-backdrop-filter: none !important;
-      }
-
-      /* 工作區維持在最上層 */
-      #sidebar {
-        z-index: 10001 !important;
-      }
-    `;
-    document.head.appendChild(style);
-  }
-
-  if (document.readyState === "loading") {
-    document.addEventListener(
-      "DOMContentLoaded",
-      applyClearWorkspace,
-      { once: true }
-    );
-  } else {
-    applyClearWorkspace();
-  }
 })();
